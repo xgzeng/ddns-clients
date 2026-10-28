@@ -1,0 +1,30 @@
+#!/usr/bin/make -f
+
+# keep cargo's downloads and build output inside debian/, so `clean` can
+# remove them without touching the developer's target/
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+export CARGO_TARGET_DIR = $(CURDIR)/debian/cargo-target
+# debug info for the -dbgsym package (dh_strip splits it off), without
+# build paths in the binary
+export CARGO_PROFILE_RELEASE_DEBUG = true
+export RUSTFLAGS += --remap-path-prefix=$(CURDIR)=/usr/src/ddns-clients \
+	--remap-path-prefix=$(CARGO_HOME)=/usr/src/cargo
+
+CARGO_FLAGS = --release --locked
+ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+  CARGO_FLAGS += -j $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+endif
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build $(CARGO_FLAGS) -p ddnsd
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cargo test $(CARGO_FLAGS) --workspace
+endif
+
+override_dh_auto_clean:
+	rm -rf debian/cargo-home debian/cargo-target

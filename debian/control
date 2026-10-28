@@ -1,0 +1,20 @@
+Source: ddns-clients
+Section: net
+Priority: optional
+Maintainer: XiaoGuang Zeng <xgzeng@gmail.com>
+Build-Depends: debhelper-compat (= 13), cargo, rustc (>= 1.85)
+Standards-Version: 4.7.2
+Homepage: https://github.com/xgzeng/ddns-clients
+Vcs-Browser: https://github.com/xgzeng/ddns-clients
+Vcs-Git: https://github.com/xgzeng/ddns-clients.git
+Rules-Requires-Root: no
+
+Package: ddnsd
+Architecture: linux-any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: dynamic DNS daemon for Cloudflare and No-IP
+ ddnsd periodically finds this host's public IPv4 and IPv6 addresses, using
+ HTTP echo services or the addresses of local network interfaces, and keeps
+ the A and AAAA records of a domain pointed at them.
+ .
+ Supported DNS providers are Cloudflare and No-IP.

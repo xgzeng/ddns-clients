@@ -1,0 +1,8 @@
+.env
+.DS_Store
+target
+**/*.rs.bk
+config.yaml
+.act_artifacts
+.act_cache
+mise.local.toml

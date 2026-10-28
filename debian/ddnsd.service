@@ -1,0 +1,40 @@
+[Unit]
+Description=Dynamic DNS daemon
+Documentation=file:///usr/share/doc/ddnsd/README.md
+Wants=network-online.target
+After=network-online.target
+# start once the administrator has written the config, see
+# /usr/share/doc/ddnsd/examples/ddnsd.example.yaml
+ConditionPathExists=/etc/ddnsd.yaml
+
+[Service]
+ExecStart=/usr/sbin/ddnsd -c /etc/ddnsd.yaml
+# ddnsd only exits on errors that need a configuration fix (e.g. credentials
+# a provider rejected); restarting would just repeat the rejected request
+Restart=on-abnormal
+RestartSec=30
+
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

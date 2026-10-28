@@ -1,0 +1,4 @@
+# default VCS ignores, plus local build output and credentials
+tar-ignore
+tar-ignore = "target"
+tar-ignore = "mise.local.toml"

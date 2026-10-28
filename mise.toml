@@ -1,0 +1,24 @@
+[tools]
+rust = "latest"
+
+[tasks.test-live]
+description = "Run the live tests against real provider APIs (see README for the variables)"
+run = "cargo test -p ddns-clients --test live -- --include-ignored --nocapture"
+
+[tasks.deb]
+description = "Build the Debian package in a Debian container (output in target/debian)"
+run = '''
+mkdir -p target/debian
+${CONTAINER_ENGINE:-podman} run --rm -i -v "$PWD":/src:ro -v "$PWD/target/debian":/out \
+  "${DEBIAN_IMAGE:-docker.io/library/debian:trixie}" bash -eus <<'SCRIPT'
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -qq -y --no-install-recommends build-essential debhelper cargo rustc ca-certificates >/dev/null
+mkdir -p /build/ddns-clients
+tar -C /src --exclude=./target --exclude=./mise.local.toml -cf - . | tar -C /build/ddns-clients -xf -
+cd /build/ddns-clients
+dpkg-buildpackage -us -uc
+cp /build/*.deb /build/*.dsc /build/*.tar.xz /build/*.buildinfo /build/*.changes /out/
+SCRIPT
+ls -l target/debian
+'''

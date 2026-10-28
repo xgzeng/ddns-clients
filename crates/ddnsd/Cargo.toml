@@ -1,0 +1,21 @@
+[package]
+name = "ddnsd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Dynamic DNS daemon built on the ddns-clients library."
+
+[dependencies]
+anyhow = "1.0.97"
+clap = { version = "4.5.35", features = ["derive"] }
+ddns-clients.workspace = true
+env_logger = "0.11.8"
+hostname = "0.4.1"
+log.workspace = true
+serde = { version = "1.0.219", features = ["derive"] }
+serde_yaml = "0.9"
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+
+[dev-dependencies]
+async-trait = "0.1"
