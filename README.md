@@ -1,5 +1,9 @@
 # DDNS clients
 
+> [!WARNING]
+> This project is in early development. The library API, the daemon's config
+> format and the packaging may change incompatibly between releases.
+
 A multi-provider dynamic DNS client library and daemon written in Rust.
 
 | Crate | Path | |
