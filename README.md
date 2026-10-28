@@ -98,14 +98,15 @@ Log level is controlled with `RUST_LOG` (default `info`).
 page and an example config. On Debian 13 (trixie) or later:
 
 ```sh
-sudo apt install build-essential debhelper cargo rustc
+sudo apt build-dep ./
 dpkg-buildpackage -us -uc     # cargo downloads the crates, so this needs network access
 sudo apt install ../ddnsd_*.deb
 ```
 
-Elsewhere, `mise run deb` builds it in a `debian:trixie` container (podman, or set
-`CONTAINER_ENGINE=docker`; `DEBIAN_IMAGE` picks another release) and writes the
-packages to `target/debian/`.
+Elsewhere, `mise run deb` (`scripts/build-deb.sh`) builds it in a `debian:trixie`
+podman container (`DEBIAN_IMAGE` picks another release) and writes the packages
+to `target/debian/`. The source tree is mounted as an overlay, so the build
+leaves it untouched.
 
 The service starts once `/etc/ddnsd.yaml` exists:
 
@@ -118,6 +119,29 @@ sudo systemctl start ddnsd
 It isn't restarted when ddnsd exits on a rejected update; fix the config and
 start it again. Debian's packaged Rust sets the minimum supported Rust version:
 `rust-version = "1.85"`, the version in trixie.
+
+## Releases
+
+GitHub Actions (`.github/workflows/`) lints, tests and builds every push to
+`main` and every pull request. Pushing a `v<version>` tag publishes a GitHub
+release with:
+
+- `ddnsd-<version>-x86_64-unknown-linux-musl` and
+  `ddnsd-<version>-aarch64-unknown-linux-musl`: static binaries that run on any
+  Linux distribution (`chmod +x` after downloading);
+- `ddnsd_<version>_amd64.deb` and `ddnsd_<version>_arm64.deb`: Debian 13
+  (trixie) packages;
+- `SHA256SUMS`.
+
+The tag must match the version in `Cargo.toml` and `debian/changelog`:
+
+```sh
+# bump `version` in Cargo.toml, run `cargo update --workspace` to update Cargo.lock, then:
+dch -v 0.0.2 "Describe the changes."   # or add a debian/changelog entry by hand
+git commit -am "Release 0.0.2"
+git tag v0.0.2
+git push origin main v0.0.2
+```
 
 ## Testing
 
