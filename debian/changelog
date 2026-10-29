@@ -1,3 +1,16 @@
+ddns-clients (0.0.2) unstable; urgency=medium
+
+  * The config file is now TOML: /etc/ddnsd.toml replaces /etc/ddnsd.yaml.
+  * Update any number of providers, as [provider.<name>] tables; a provider
+    that rejects its updates is dropped while the others keep running.
+  * New settings: replace_only (only re-point existing records) and
+    refresh_interval (re-read records hourly, warning about changes made
+    elsewhere).
+  * New dry-run command, showing what an update would change.
+  * No-IP: read the current records from No-IP's nameservers.
+
+ -- XiaoGuang Zeng <xgzeng@gmail.com>  Thu, 29 Oct 2026 01:26:31 -0400
+
 ddns-clients (0.0.1) unstable; urgency=medium
 
   * Initial release.
