@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::{DynDnsProvider, RecordUpdate, UpdateBuilder, UpdateSummary, plan_changes};
+use super::{
+    DynDnsProvider, RecordUpdateRequest, UpdateRequestBuilder, UpdateSummary, plan_changes,
+};
 use crate::{Error, Result};
 
 const BASE_URL: &str = "https://api.cloudflare.com/client/v4";
@@ -183,38 +185,38 @@ impl DynDnsProvider for CloudflareProvider {
         Ok(records.into_iter().map(|(_, ip)| ip).collect())
     }
 
-    fn update<'a>(&'a mut self, domain: &str) -> UpdateBuilder<'a> {
-        UpdateBuilder::new(self, domain)
+    fn update_request<'a>(&'a mut self, domain: &str) -> UpdateRequestBuilder<'a> {
+        UpdateRequestBuilder::new(self, domain)
     }
 
-    async fn apply_update(&mut self, update: RecordUpdate) -> Result<UpdateSummary> {
-        let existing = self.address_records(&update.domain).await?;
-        let plan = plan_changes(&existing, &update);
+    async fn execute_request(&mut self, request: RecordUpdateRequest) -> Result<UpdateSummary> {
+        let existing = self.address_records(&request.domain).await?;
+        let plan = plan_changes(&existing, &request);
         let zone_id = self.zone_id().await?;
         let records_url = format!("{BASE_URL}/zones/{zone_id}/dns_records");
 
         for (id, ip) in &plan.repoint {
             // PATCH keeps fields we don't send, e.g. proxied, comment and tags
-            let request = self
+            let http = self
                 .client
                 .patch(format!("{records_url}/{id}"))
-                .json(&RecordBody::new(&update.domain, *ip, update.ttl));
-            let _: DnsRecord = self.call(request).await?;
-            log::debug!("{}: re-pointed record {id} to {ip}", update.domain);
+                .json(&RecordBody::new(&request.domain, *ip, request.ttl));
+            let _: DnsRecord = self.call(http).await?;
+            log::debug!("{}: re-pointed record {id} to {ip}", request.domain);
         }
         for id in &plan.delete {
-            let request = self.client.delete(format!("{records_url}/{id}"));
-            let _: Deleted = self.call(request).await?;
-            log::debug!("{}: deleted record {id}", update.domain);
+            let http = self.client.delete(format!("{records_url}/{id}"));
+            let _: Deleted = self.call(http).await?;
+            log::debug!("{}: deleted record {id}", request.domain);
         }
         for ip in &plan.create {
-            let request = self.client.post(&records_url).json(&RecordBody::new(
-                &update.domain,
+            let http = self.client.post(&records_url).json(&RecordBody::new(
+                &request.domain,
                 *ip,
-                update.ttl,
+                request.ttl,
             ));
-            let _: DnsRecord = self.call(request).await?;
-            log::debug!("{}: created record for {ip}", update.domain);
+            let _: DnsRecord = self.call(http).await?;
+            log::debug!("{}: created record for {ip}", request.domain);
         }
 
         Ok(plan.summary())

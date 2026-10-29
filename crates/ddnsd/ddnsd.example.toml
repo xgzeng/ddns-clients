@@ -1,0 +1,34 @@
+# Example ddnsd configuration. Install it with restricted permissions, the
+# daemon refuses a config readable by group or others:
+#
+#   install -m 600 ddnsd.example.toml /etc/ddnsd.toml
+#
+# Top-level settings must come before the first [provider.<name>] table.
+
+interval = 300                 # seconds between checks, default 300
+resolvers = [                  # tried in order per family; default: icanhazip, local
+  { type = "icanhazip" },
+  { type = "local" },          # global addresses of local interfaces
+]
+# defaults for all providers, each can override them
+ipv4 = true                    # default true
+ipv6 = true                    # default true
+ttl = 600                      # 0 = provider default; default 600
+max_records = 2                # max A/AAAA records kept, default 2
+replace_only = false           # only re-point existing records, never create or
+                               # delete any; default false
+
+# One table per provider. `type` defaults to the name after "provider.", so
+# [provider.cloudflare] needs no type; several entries of the same type need
+# distinct names and an explicit type.
+[provider.cloudflare]
+api_token = "..."              # needs Zone:Read and DNS:Edit
+zone = "example.com"
+domain = "myhost.example.com"  # optional for cloudflare, default <hostname>.<zone>
+
+# [provider.noip]
+# username = "..."
+# password = "..."
+# user_agent = "..."           # optional; "Company Program/Version contact@example.com"
+# domain = "myhost.ddns.net"   # required
+# ipv6 = false                 # overrides the default above

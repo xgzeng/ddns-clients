@@ -8,23 +8,24 @@ ddnsd \- dynamic DNS daemon
 .SH DESCRIPTION
 .B ddnsd
 periodically finds this host's public IPv4 and IPv6 addresses and keeps the
-A and AAAA records of a domain pointed at them, using the Cloudflare or No-IP
-DNS provider.
+A and AAAA records of one or more domains pointed at them, using the
+Cloudflare and No-IP DNS providers.
 .PP
 Addresses are found with HTTP echo services (icanhazip, ipify or custom URLs)
 or from the global addresses of local network interfaces, tried in the
 configured order for each address family.
 .PP
-The daemon exits when the provider rejects an update in a way that needs the
-configuration to be fixed, such as invalid credentials, and waits as long as
-the provider asks after server errors.
+When a provider rejects an update in a way that needs the configuration to be
+fixed, such as invalid credentials, the daemon stops updating that provider,
+and exits once all providers have been rejected. After server errors it waits
+as long as the provider asks before updating that provider again.
 .SH OPTIONS
 .TP
 .BR \-c ", " \-\-config " " \fIconfig\fR
 Read the configuration from
 .IR config .
 The default is
-.IR /etc/ddnsd.yaml .
+.IR /etc/ddnsd.toml .
 .TP
 .BR \-h ", " \-\-help
 Print a help message and exit.
@@ -33,11 +34,11 @@ Print a help message and exit.
 Print the version and exit.
 .SH FILES
 .TP
-.I /etc/ddnsd.yaml
-The YAML configuration file. It contains provider credentials and must not be
+.I /etc/ddnsd.toml
+The TOML configuration file. It contains provider credentials and must not be
 readable by group or others, e.g. mode 0600.
 .TP
-.I /usr/share/doc/ddnsd/examples/ddnsd.example.yaml
+.I /usr/share/doc/ddnsd/examples/ddnsd.example.toml
 An example configuration describing all settings.
 .SH ENVIRONMENT
 .TP
@@ -53,8 +54,8 @@ Configure and start the service:
 .PP
 .nf
 .RS
-install \-m 600 /usr/share/doc/ddnsd/examples/ddnsd.example.yaml /etc/ddnsd.yaml
-editor /etc/ddnsd.yaml
+install \-m 600 /usr/share/doc/ddnsd/examples/ddnsd.example.toml /etc/ddnsd.toml
+editor /etc/ddnsd.toml
 systemctl start ddnsd
 .RE
 .fi

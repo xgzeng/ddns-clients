@@ -18,17 +18,14 @@
 //!     .ttl(Some(300))
 //!     .build()?;
 //! let resolvers = resolve::default_resolvers();
-//! let ips = resolve::resolve_public_ips(&resolvers, &[resolve::IpFamily::V4]).await;
+//! let families = [resolve::IpFamily::V4, resolve::IpFamily::V6];
+//! let ips = resolve::resolve_public_ips(&resolvers, &families).await;
 //!
-//! // replace the domain's A records with the resolved addresses
-//! let current = client.list().await?;
-//! let summary = client
-//!     .update()
-//!     .remove_all(current.into_iter().filter(|ip| ip.is_ipv4()))
-//!     .add_all(ips)
-//!     .send()
-//!     .await?;
-//! println!("{summary:?}");
+//! // replace the domain's A/AAAA records with the resolved addresses
+//! if !ips.is_empty() {
+//!     let summary = client.update(ips).await?;
+//!     println!("{summary:?}");
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -42,5 +39,5 @@ pub use client::{DynDnsClient, DynDnsClientBuilder};
 pub use error::{Error, Result};
 pub use providers::cloudflare::CloudflareProvider;
 pub use providers::noip::NoIpProvider;
-pub use providers::{DynDnsProvider, RecordUpdate, UpdateBuilder, UpdateSummary};
+pub use providers::{DynDnsProvider, RecordUpdateRequest, UpdateRequestBuilder, UpdateSummary};
 pub use resolve::IpResolver;

@@ -52,7 +52,8 @@ mod cloudflare {
     };
 
     use ddns_clients::{
-        CloudflareProvider, DynDnsProvider, Error, providers::cloudflare::CloudflareError,
+        CloudflareProvider, DynDnsProvider, Error, UpdateSummary,
+        providers::cloudflare::CloudflareError,
     };
 
     use super::{ip, required_env, summary};
@@ -85,6 +86,18 @@ mod cloudflare {
         Ok(ips)
     }
 
+    async fn remove_all_records(
+        provider: &mut CloudflareProvider,
+        domain: &str,
+    ) -> Result<UpdateSummary, Error> {
+        let existing = provider.list(domain).await?;
+        provider
+            .update_request(domain)
+            .remove_all(existing)
+            .send()
+            .await
+    }
+
     async fn exercise_records(
         provider: &mut CloudflareProvider,
         domain: &str,
@@ -99,7 +112,7 @@ mod cloudflare {
         let aaaa1 = ip("2001:db8::1");
 
         let result = provider
-            .update(domain)
+            .update_request(domain)
             .add(a1)
             .add(aaaa1)
             .ttl(Some(120))
@@ -109,23 +122,36 @@ mod cloudflare {
         assert_eq!(sorted_ips(provider, domain).await?, vec![a1, aaaa1]);
 
         // replacing an address re-points the existing record
-        let result = provider.update(domain).remove(a1).add(a2).send().await?;
+        let result = provider
+            .update_request(domain)
+            .remove(a1)
+            .add(a2)
+            .send()
+            .await?;
         assert_eq!(result, summary(1, 1, 0, 0));
         assert_eq!(sorted_ips(provider, domain).await?, vec![a2, aaaa1]);
 
         // AAAA -> A on the same record
-        let result = provider.update(domain).remove(aaaa1).add(a3).send().await?;
+        let result = provider
+            .update_request(domain)
+            .remove(aaaa1)
+            .add(a3)
+            .send()
+            .await?;
         assert_eq!(result, summary(1, 1, 0, 0));
         assert_eq!(sorted_ips(provider, domain).await?, vec![a2, a3]);
 
         // adding a present address changes nothing
-        let result = provider.update(domain).add(a2).send().await?;
+        let result = provider.update_request(domain).add(a2).send().await?;
         assert_eq!(result, summary(2, 0, 0, 0));
 
-        let result = provider.update(domain).clear().send().await?;
+        let result = remove_all_records(provider, domain).await?;
         assert_eq!(result, summary(0, 0, 2, 0));
         let records = provider.list(domain).await?;
-        assert!(records.is_empty(), "records left after clear: {records:?}");
+        assert!(
+            records.is_empty(),
+            "records left after removal: {records:?}"
+        );
         Ok(())
     }
 
@@ -151,7 +177,7 @@ mod cloudflare {
 
         // best-effort cleanup
         let mut provider = new_provider();
-        if let Err(err) = provider.update(&env.domain).clear().send().await {
+        if let Err(err) = remove_all_records(&mut provider, &env.domain).await {
             eprintln!("cleanup of {} failed: {err:?}", env.domain);
         }
         panic!("cloudflare record lifecycle test failed, see output above");
@@ -223,7 +249,7 @@ mod noip {
         let changed = summary(original.len() - 1, 1, 0, 0);
 
         let result = provider
-            .update(&env.hostname)
+            .update_request(&env.hostname)
             .remove_all(original_v4.clone())
             .add(test_ip)
             .send()
@@ -234,7 +260,7 @@ mod noip {
         assert!(current.contains(&test_ip), "{current:?}");
 
         let result = provider
-            .update(&env.hostname)
+            .update_request(&env.hostname)
             .remove(test_ip)
             .add_all(original_v4)
             .send()

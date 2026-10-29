@@ -15,6 +15,6 @@ Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: dynamic DNS daemon for Cloudflare and No-IP
  ddnsd periodically finds this host's public IPv4 and IPv6 addresses, using
  HTTP echo services or the addresses of local network interfaces, and keeps
- the A and AAAA records of a domain pointed at them.
+ the A and AAAA records of one or more domains pointed at them.
  .
  Supported DNS providers are Cloudflare and No-IP.

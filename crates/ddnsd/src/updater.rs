@@ -1,92 +1,62 @@
 use std::net::IpAddr;
 
-use ddns_clients::{DynDnsClient, Result, UpdateSummary};
+use ddns_clients::{DynDnsClient, Result, UpdateSummary, resolve::IpFamily};
 
-/// Settings for an [`Updater`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpdaterOptions {
-    /// Manage A records.
-    pub ipv4: bool,
-    /// Manage AAAA records.
-    pub ipv6: bool,
-    /// Maximum number of address records kept for the domain.
-    pub max_records: usize,
-}
-
-impl Default for UpdaterOptions {
-    fn default() -> Self {
-        UpdaterOptions {
-            ipv4: true,
-            ipv6: true,
-            max_records: 2,
-        }
-    }
-}
-
-/// Keeps the address records of the client's domain in sync with a set of
-/// IPs.
+/// Keeps the client's domain pointed at a set of IPs, with at most
+/// `max_records` address records.
 ///
-/// Records are cached between calls and only re-fetched from the provider
-/// after a failed update.
+/// Only the client's enabled address families are touched. The client caches
+/// the domain's records between updates; they are only listed again after a
+/// failed update.
 pub struct Updater {
     client: DynDnsClient,
-    options: UpdaterOptions,
-    records: Vec<IpAddr>, // cache existing dns records
-    records_dirty: bool,
+    max_records: usize,
 }
 
 impl Updater {
     /// Creates an updater managing the domain of `client`.
-    pub fn new(client: DynDnsClient, options: UpdaterOptions) -> Self {
+    pub fn new(client: DynDnsClient, max_records: usize) -> Self {
         Updater {
             client,
-            options,
-            records: vec![],
-            records_dirty: true,
+            max_records,
         }
     }
 
-    fn is_enabled(&self, ip: &IpAddr) -> bool {
-        match ip {
-            IpAddr::V4(_) => self.options.ipv4,
-            IpAddr::V6(_) => self.options.ipv6,
-        }
+    pub fn client(&self) -> &DynDnsClient {
+        &self.client
     }
 
-    async fn refresh_records(&mut self) -> Result<()> {
-        log::info!("refresh dns records");
-        let mut records = self.client.list().await?;
-        records.retain(|ip| self.is_enabled(ip));
+    async fn refresh_records(&mut self) -> Result<Vec<IpAddr>> {
+        log::info!("{}: refresh dns records", self.client.domain());
+        let records = self.client.list().await?;
         log::info!("{} have {} records: ", self.client.domain(), records.len());
         for ip in &records {
             log::info!("    {ip}");
         }
-        self.records = records;
-        Ok(())
+        Ok(records)
     }
 
     /// Makes the domain's records point at `ips`.
     ///
-    /// Addresses of disabled families are ignored. Stale records are replaced
-    /// or removed, and new ones added up to [`UpdaterOptions::max_records`].
+    /// Stale records are replaced or removed, and new ones added up to
+    /// `max_records`.
     pub async fn update_ips(&mut self, ips: &[IpAddr]) -> Result<UpdateSummary> {
-        if self.records_dirty {
-            self.refresh_records().await?;
-            self.records_dirty = false;
-        }
-
+        let records = match self.client.cached_records() {
+            Some(records) => records.to_vec(),
+            None => self.refresh_records().await?,
+        };
         let ips: Vec<IpAddr> = ips
             .iter()
             .copied()
-            .filter(|ip| self.is_enabled(ip))
+            .filter(|ip| self.client.is_enabled(IpFamily::of(ip)))
             .collect();
-        let (keep, stale, mut add) = diff_records(&self.records, &ips);
+        let (keep, stale, mut add) = diff_records(&records, &ips);
 
         // we don't want to exceed the max count
-        add.truncate(self.options.max_records.saturating_sub(keep.len()));
+        add.truncate(self.max_records.saturating_sub(keep.len()));
 
         if stale.is_empty() && add.is_empty() {
-            log::debug!("no record changes");
+            log::debug!("{}: no record changes", self.client.domain());
             return Ok(UpdateSummary {
                 kept: keep.len(),
                 ..Default::default()
@@ -94,26 +64,13 @@ impl Updater {
         }
 
         log::info!(
-            "record changes: keep={:?}, remove={:?}, add={:?}",
+            "{}: record changes: keep={:?}, remove={:?}, add={:?}",
+            self.client.domain(),
             keep,
             stale,
             add
         );
-
-        // mark records dirty in case of failure
-        self.records_dirty = true;
-        let desired: Vec<IpAddr> = keep.into_iter().chain(add).collect();
-        // re-adding the kept addresses drops duplicate records of them
-        let summary = self
-            .client
-            .update()
-            .remove_all(stale)
-            .add_all(desired.iter().copied())
-            .send()
-            .await?;
-        self.records = desired;
-        self.records_dirty = false;
-        Ok(summary)
+        self.client.update(keep.into_iter().chain(add)).await
     }
 }
 
@@ -143,7 +100,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use ddns_clients::{
-        DynDnsProvider, Error, RecordUpdate, UpdateBuilder, providers::plan_changes,
+        DynDnsProvider, Error, RecordUpdateRequest, UpdateRequestBuilder, providers::plan_changes,
     };
 
     fn ip(s: &str) -> IpAddr {
@@ -196,14 +153,14 @@ mod tests {
             Ok(state.records.iter().map(|(_, ip)| *ip).collect())
         }
 
-        fn update<'a>(&'a mut self, domain: &str) -> UpdateBuilder<'a> {
-            UpdateBuilder::new(self, domain)
+        fn update_request<'a>(&'a mut self, domain: &str) -> UpdateRequestBuilder<'a> {
+            UpdateRequestBuilder::new(self, domain)
         }
 
-        async fn apply_update(&mut self, update: RecordUpdate) -> Result<UpdateSummary> {
+        async fn execute_request(&mut self, request: RecordUpdateRequest) -> Result<UpdateSummary> {
             let state = &mut *self.0.lock().unwrap();
             state.check_fail()?;
-            let plan = plan_changes(&state.records, &update);
+            let plan = plan_changes(&state.records, &request);
             for (id, ip) in &plan.repoint {
                 state.records.iter_mut().find(|(i, _)| i == id).unwrap().1 = *ip;
             }
@@ -216,15 +173,21 @@ mod tests {
         }
     }
 
-    /// An updater on a mock provider starting with `state`, and the shared
-    /// mock state.
-    fn updater(state: MockState, options: UpdaterOptions) -> (Updater, Arc<Mutex<MockState>>) {
+    /// An updater (both families, at most 2 records) on a mock provider
+    /// starting with `state`, and the shared mock state.
+    fn updater(state: MockState) -> (Updater, Arc<Mutex<MockState>>) {
+        updater_with(state, true, 2)
+    }
+
+    fn updater_with(
+        state: MockState,
+        ipv4: bool,
+        max_records: usize,
+    ) -> (Updater, Arc<Mutex<MockState>>) {
         let state = Arc::new(Mutex::new(state));
-        let client = DynDnsClient::custom(MockProvider(state.clone()))
-            .domain("host.example.com")
-            .build()
-            .unwrap();
-        (Updater::new(client, options), state)
+        let client =
+            DynDnsClient::new(MockProvider(state.clone()), "host.example.com").enable_ipv4(ipv4);
+        (Updater::new(client, max_records), state)
     }
 
     #[test]
@@ -249,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn unchanged() {
         let state = MockState::with(vec![rec("a", "1.1.1.1")]);
-        let (mut u, _) = updater(state, UpdaterOptions::default());
+        let (mut u, _) = updater(state);
         let summary = u.update_ips(&[ip("1.1.1.1")]).await.unwrap();
         assert!(summary.is_unchanged());
         assert_eq!(summary.kept, 1);
@@ -257,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn creates_missing() {
-        let (mut u, mock) = updater(MockState::default(), UpdaterOptions::default());
+        let (mut u, mock) = updater(MockState::default());
         let summary = u
             .update_ips(&[ip("1.1.1.1"), ip("2001:4860::1")])
             .await
@@ -267,13 +230,13 @@ mod tests {
             mock.lock().unwrap().ips(),
             vec![ip("1.1.1.1"), ip("2001:4860::1")]
         );
-        assert_eq!(u.records.len(), 2);
+        assert_eq!(u.client.cached_records().unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn replaces_via_update() {
         let state = MockState::with(vec![rec("a", "1.1.1.1")]);
-        let (mut u, mock) = updater(state, UpdaterOptions::default());
+        let (mut u, mock) = updater(state);
         let summary = u.update_ips(&[ip("2.2.2.2")]).await.unwrap();
         assert_eq!(
             summary,
@@ -288,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn deletes_surplus() {
         let state = MockState::with(vec![rec("a", "1.1.1.1"), rec("b", "2.2.2.2")]);
-        let (mut u, mock) = updater(state, UpdaterOptions::default());
+        let (mut u, mock) = updater(state);
         let summary = u.update_ips(&[ip("2.2.2.2")]).await.unwrap();
         assert_eq!(summary.deleted, 1);
         assert_eq!(mock.lock().unwrap().records, vec![rec("b", "2.2.2.2")]);
@@ -297,7 +260,7 @@ mod tests {
     #[tokio::test]
     async fn deletes_duplicates() {
         let state = MockState::with(vec![rec("a", "1.1.1.1"), rec("b", "1.1.1.1")]);
-        let (mut u, mock) = updater(state, UpdaterOptions::default());
+        let (mut u, mock) = updater(state);
         let summary = u.update_ips(&[ip("1.1.1.1")]).await.unwrap();
         assert_eq!(summary.deleted, 1);
         assert_eq!(mock.lock().unwrap().records, vec![rec("a", "1.1.1.1")]);
@@ -305,11 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn caps_at_max_records() {
-        let options = UpdaterOptions {
-            max_records: 1,
-            ..Default::default()
-        };
-        let (mut u, mock) = updater(MockState::default(), options);
+        let (mut u, mock) = updater_with(MockState::default(), true, 1);
         let summary = u.update_ips(&[ip("1.1.1.1"), ip("2.2.2.2")]).await.unwrap();
         assert_eq!(summary.created, 1);
         assert_eq!(mock.lock().unwrap().records.len(), 1);
@@ -318,11 +277,7 @@ mod tests {
     #[tokio::test]
     async fn ignores_disabled_family() {
         let state = MockState::with(vec![rec("a", "1.1.1.1")]);
-        let options = UpdaterOptions {
-            ipv4: false,
-            ..Default::default()
-        };
-        let (mut u, mock) = updater(state, options);
+        let (mut u, mock) = updater_with(state, false, 2);
         let summary = u
             .update_ips(&[ip("2.2.2.2"), ip("2001:4860::1")])
             .await
@@ -336,8 +291,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keeps_disabled_family_records() {
+        let state = MockState::with(vec![rec("a", "1.1.1.1"), rec("b", "2001:4860::1")]);
+        let (mut u, mock) = updater_with(state, false, 2);
+        let summary = u.update_ips(&[ip("2001:4860::2")]).await.unwrap();
+        assert_eq!(summary.updated, 1);
+        assert_eq!(summary.deleted + summary.created, 0);
+        assert_eq!(
+            mock.lock().unwrap().records,
+            vec![rec("a", "1.1.1.1"), rec("b", "2001:4860::2")]
+        );
+    }
+
+    #[tokio::test]
     async fn refreshes_after_failure() {
-        let (mut u, mock) = updater(MockState::default(), UpdaterOptions::default());
+        let (mut u, mock) = updater(MockState::default());
         u.update_ips(&[ip("1.1.1.1")]).await.unwrap();
         assert_eq!(mock.lock().unwrap().list_calls, 1);
 

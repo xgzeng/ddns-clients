@@ -1,11 +1,16 @@
 //! [No-IP](https://www.noip.com/) dynamic DNS provider, using its
 //! [update API](https://www.noip.com/integrate/request).
 
+mod dns;
+
 use std::{collections::HashMap, fmt, net::IpAddr, time::Duration};
 
 use async_trait::async_trait;
 
-use super::{ChangePlan, DynDnsProvider, RecordUpdate, UpdateBuilder, UpdateSummary, plan_changes};
+use super::{
+    ChangePlan, DynDnsProvider, RecordUpdateRequest, UpdateRequestBuilder, UpdateSummary,
+    plan_changes,
+};
 use crate::{Error, Result};
 
 const UPDATE_URL: &str = "https://dynupdate.no-ip.com/nic/update";
@@ -23,7 +28,9 @@ const DEFAULT_USER_AGENT: &str = concat!("ddns-clients ddns-clients/", env!("CAR
 ///   [`Error::Unsupported`].
 /// - The update API cannot read records, so [`list`](DynDnsProvider::list)
 ///   returns the addresses set by this provider's last successful update,
-///   or else resolves the hostname through the system resolver.
+///   or else asks No-IP's nameservers (`nf1`–`nf5.no-ip.com`) over TCP. If
+///   none of them answers, e.g. for a domain they don't serve, it falls back
+///   to the system resolver, whose answer may be cached or overridden.
 /// - The TTL of an update is ignored.
 /// - Errors that need user intervention (bad credentials, unknown hostname,
 ///   blocked client) are [`Error::Rejected`], and No-IP requires clients to
@@ -175,6 +182,12 @@ impl NoIpProvider {
         if let Some(ips) = self.known.get(domain) {
             return Ok(ips.clone());
         }
+        match dns::lookup(domain).await {
+            Ok(ips) => return Ok(ips),
+            Err(err) => log::warn!(
+                "{domain}: no answer from No-IP's nameservers ({err}), using the system resolver"
+            ),
+        }
         let mut ips = vec![];
         for addr in tokio::net::lookup_host((domain, 0)).await? {
             if !ips.contains(&addr.ip()) {
@@ -191,14 +204,14 @@ impl DynDnsProvider for NoIpProvider {
         self.addresses(domain).await
     }
 
-    fn update<'a>(&'a mut self, domain: &str) -> UpdateBuilder<'a> {
-        UpdateBuilder::new(self, domain)
+    fn update_request<'a>(&'a mut self, domain: &str) -> UpdateRequestBuilder<'a> {
+        UpdateRequestBuilder::new(self, domain)
     }
 
-    async fn apply_update(&mut self, update: RecordUpdate) -> Result<UpdateSummary> {
-        let existing = self.addresses(&update.domain).await?;
+    async fn execute_request(&mut self, request: RecordUpdateRequest) -> Result<UpdateSummary> {
+        let existing = self.addresses(&request.domain).await?;
         let records: Vec<(IpAddr, IpAddr)> = existing.iter().map(|ip| (*ip, *ip)).collect();
-        let plan = plan_changes(&records, &update);
+        let plan = plan_changes(&records, &request);
         // No-IP may block clients that send updates without changes
         if plan.summary().is_unchanged() {
             return Ok(plan.summary());
@@ -211,20 +224,20 @@ impl DynDnsProvider for NoIpProvider {
             .join(",");
 
         // forget the cached addresses until the update is known to succeed
-        self.known.remove(&update.domain);
+        self.known.remove(&request.domain);
         let response = self
             .client
             .get(UPDATE_URL)
             .basic_auth(&self.username, Some(&self.password))
-            .query(&[("hostname", update.domain.as_str()), ("myip", &myip)])
+            .query(&[("hostname", request.domain.as_str()), ("myip", &myip)])
             .send()
             .await?;
         let status = response.status().as_u16();
         let body = response.text().await?;
         parse_response(status, &body, &ips)?;
-        log::debug!("{}: set addresses to {myip}", update.domain);
+        log::debug!("{}: set addresses to {myip}", request.domain);
 
-        self.known.insert(update.domain, ips);
+        self.known.insert(request.domain, ips);
         Ok(plan.summary())
     }
 }
@@ -244,12 +257,12 @@ mod tests {
     fn planned(existing: &[&str], add: &[&str], remove: &[&str]) -> Result<Vec<IpAddr>> {
         let existing = ips(existing);
         let records: Vec<_> = existing.iter().map(|ip| (*ip, *ip)).collect();
-        let update = RecordUpdate {
+        let request = RecordUpdateRequest {
             add: ips(add),
             remove: ips(remove),
             ..Default::default()
         };
-        planned_addresses(&existing, &plan_changes(&records, &update))
+        planned_addresses(&existing, &plan_changes(&records, &request))
     }
 
     fn inner(err: &Error) -> &NoIpError {

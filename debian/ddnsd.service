@@ -4,11 +4,11 @@ Documentation=file:///usr/share/doc/ddnsd/README.md
 Wants=network-online.target
 After=network-online.target
 # start once the administrator has written the config, see
-# /usr/share/doc/ddnsd/examples/ddnsd.example.yaml
-ConditionPathExists=/etc/ddnsd.yaml
+# /usr/share/doc/ddnsd/examples/ddnsd.example.toml
+ConditionPathExists=/etc/ddnsd.toml
 
 [Service]
-ExecStart=/usr/sbin/ddnsd -c /etc/ddnsd.yaml
+ExecStart=/usr/sbin/ddnsd -c /etc/ddnsd.toml
 # ddnsd only exits on errors that need a configuration fix (e.g. credentials
 # a provider rejected); restarting would just repeat the rejected request
 Restart=on-abnormal

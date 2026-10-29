@@ -4,190 +4,124 @@
 > This project is in early development. The library API, the daemon's config
 > format and the packaging may change incompatibly between releases.
 
-A multi-provider dynamic DNS client library and daemon written in Rust.
+A multi-provider dynamic DNS client library and daemon written in Rust:
 
-| Crate | Path | |
-|---|---|---|
-| `ddns-clients` | `crates/ddns-clients` | Library: `IpResolver` trait and resolvers, `DynDnsProvider` trait and providers |
-| `ddnsd` | `crates/ddnsd` | Daemon that periodically syncs a domain's A/AAAA records (owns the record-reconciliation `Updater`) |
+- `ddns-clients`, a library that finds this host's public IP addresses and
+  updates a domain's A/AAAA records on a DNS provider;
+- `ddnsd`, a daemon that keeps the records of one or more domains, on one or
+  more providers, pointed at this host.
 
 DNS providers:
 
 | Provider | Notes |
 |---|---|
 | Cloudflare | API token with `Zone:Read` and `DNS:Edit` |
-| No-IP | at most one A and one AAAA record per hostname, which can be re-pointed but not removed; TTL is ignored; current records are read via DNS |
+| No-IP | at most one A and one AAAA record per hostname, which can be re-pointed but not removed; TTL is ignored; current records are read from No-IP's nameservers over DNS |
 
 IP resolvers: HTTP echo services (icanhazip, ipify, or custom URLs) and local
-interfaces via netlink (Linux). A `Vec` of resolvers falls back in order, per
-address family.
+interfaces via netlink (Linux).
 
-## Library
+## Installation
 
-```rust
-use ddns_clients::{DynDnsClient, providers, resolve};
-
-let mut client = DynDnsClient::provider(providers::CLOUDFLARE)? // or "cloudflare"
-    .api_token("api-token")
-    .zone("example.com")
-    .domain("myhost.example.com")
-    .ttl(Some(300))
-    .build()?;
-let resolvers = resolve::default_resolvers(); // icanhazip, then local interfaces
-let ips = resolve::resolve_public_ips(&resolvers, &[resolve::IpFamily::V4]).await;
-
-// replace the domain's A records with the resolved addresses
-let current = client.list().await?;
-let summary = client
-    .update()
-    .remove_all(current.into_iter().filter(|ip| ip.is_ipv4()))
-    .add_all(ips)
-    .send()
-    .await?;
-```
-
-`build()` fails if a required parameter is missing or a parameter isn't used
-by the provider:
-
-| Provider | Required | Optional |
-|---|---|---|
-| `cloudflare` | `api_token`, `zone`, `domain` | `ttl` |
-| `noip` | `username`, `password`, `domain` | `user_agent`, `ttl` |
-
-Records are identified by address. One `update` can `add`/`add_all` and
-`remove`/`remove_all` several addresses, or `clear` all existing ones; existing
-records are re-pointed where possible, so provider-side settings survive.
-
-To add a DNS provider, implement `ddns_clients::providers::DynDnsProvider` (`list`,
-`update`, `apply_update`; `providers::plan_changes` computes the record operations)
-and wrap it with `DynDnsClient::custom(provider).domain(..).build()`, or use it
-directly; to add an IP source, implement `ddns_clients::IpResolver`.
-
-## Daemon
-
-```sh
-cargo run -p ddnsd -- -c /etc/ddnsd.yaml
-```
-
-The config file must not be readable by group/others (`chmod 600`).
-
-```yaml
-provider:
-  type: cloudflare
-  api_token: "..."
-  zone: example.com
-domain: myhost.example.com   # optional, default <hostname>.<zone>
-ipv4: true                   # default true
-ipv6: true                   # default true
-interval: 300                # seconds between checks, default 300
-ttl: 600                     # 0 = provider default; default 600
-max_records: 2               # max A/AAAA records kept, default 2
-resolvers:                   # tried in order per family; default: icanhazip, local
-  - type: icanhazip
-  - type: ipify
-  - type: http               # any service echoing the client IP as plain text
-    ipv4_url: https://ipv4.example.net
-    ipv6_url: https://ipv6.example.net
-  - type: local              # Linux only: global addresses of local interfaces
-```
-
-For No-IP, `domain` is required:
-
-```yaml
-provider:
-  type: noip
-  username: "..."            # account email/username, or a DDNS key's username
-  password: "..."
-  user_agent: "..."          # optional; No-IP asks for "Company Program/Version contact@example.com"
-domain: myhost.ddns.net
-```
-
-The daemon exits when the provider rejects an update in a way only the user
-can fix (e.g. No-IP's `badauth`, `nohost`, `abuse`), and waits as long as the
-provider asks after server errors (30 minutes for No-IP).
-
-Log level is controlled with `RUST_LOG` (default `info`).
-
-## Debian package
-
-`debian/` builds the `ddnsd` package with debhelper. It installs
-`/usr/sbin/ddnsd`, a hardened `ddnsd.service` systemd unit, the `ddnsd(8)` man
-page and an example config. On Debian 13 (trixie) or later:
-
-```sh
-sudo apt build-dep ./
-dpkg-buildpackage -us -uc     # cargo downloads the crates, so this needs network access
-sudo apt install ../ddnsd_*.deb
-```
-
-Elsewhere, `mise run deb` (`scripts/build-deb.sh`) builds it in a `debian:trixie`
-podman container (`DEBIAN_IMAGE` picks another release) and writes the packages
-to `target/debian/`. The source tree is mounted as an overlay, so the build
-leaves it untouched.
-
-The service starts once `/etc/ddnsd.yaml` exists:
-
-```sh
-sudo install -m 600 /usr/share/doc/ddnsd/examples/ddnsd.example.yaml /etc/ddnsd.yaml
-sudoedit /etc/ddnsd.yaml
-sudo systemctl start ddnsd
-```
-
-It isn't restarted when ddnsd exits on a rejected update; fix the config and
-start it again. Debian's packaged Rust sets the minimum supported Rust version:
-`rust-version = "1.85"`, the version in trixie.
-
-## Releases
-
-GitHub Actions (`.github/workflows/`) lints, tests and builds every push to
-`main` and every pull request. Pushing a `v<version>` tag publishes a GitHub
-release with:
+Each [GitHub release](https://github.com/xgzeng/ddns-clients/releases) has:
 
 - `ddnsd-<version>-x86_64-unknown-linux-musl` and
   `ddnsd-<version>-aarch64-unknown-linux-musl`: static binaries that run on any
   Linux distribution (`chmod +x` after downloading);
-- `ddnsd_<version>_amd64.deb` and `ddnsd_<version>_arm64.deb`: Debian 13
-  (trixie) packages;
+- `ddnsd_<version>_amd64.deb` and `ddnsd_<version>_arm64.deb`: packages for
+  Debian 13 (trixie) and later;
 - `SHA256SUMS`.
 
-The tag must match the version in `Cargo.toml` and `debian/changelog`:
+The Debian package installs `/usr/sbin/ddnsd`, a hardened `ddnsd.service`
+systemd unit, the `ddnsd(8)` man page and an example config. The service starts
+once `/etc/ddnsd.toml` exists:
 
 ```sh
-# bump `version` in Cargo.toml, run `cargo update --workspace` to update Cargo.lock, then:
-dch -v 0.0.2 "Describe the changes."   # or add a debian/changelog entry by hand
-git commit -am "Release 0.0.2"
-git tag v0.0.2
-git push origin main v0.0.2
+sudo apt install ./ddnsd_<version>_amd64.deb
+sudo install -m 600 /usr/share/doc/ddnsd/examples/ddnsd.example.toml /etc/ddnsd.toml
+sudoedit /etc/ddnsd.toml
+sudo systemctl start ddnsd
 ```
 
-## Testing
+The service isn't restarted when ddnsd exits because every provider rejected
+its updates; fix the config and start it again.
+
+To build from source, see [DEVELOPMENT.md](DEVELOPMENT.md).
+
+## Library
+
+### Resolving the public IP
+
+```rust
+use ddns_clients::resolve::{self, IpFamily};
+
+let resolvers = resolve::default_resolvers(); // icanhazip, then local interfaces
+let ips = resolve::resolve_public_ips(&resolvers, &[IpFamily::V4, IpFamily::V6]).await;
+```
+
+### Updating DNS records
+
+```rust
+use ddns_clients::DynDnsClient;
+
+let mut client = DynDnsClient::provider("cloudflare")?
+    .api_token("api-token")
+    .zone("example.com")
+    .domain("myhost.example.com")
+    .build()?;
+client.update(ips).await?; // replaces the domain's A/AAAA records
+```
+
+## Daemon
 
 ```sh
-cargo test --workspace
+ddnsd -c /etc/ddnsd.toml     # the default path
 ```
 
-The tests in `crates/ddns-clients/tests/live.rs` talk to the real provider
-APIs. They are `#[ignore]`d, so `cargo test` lists them as ignored; running them
-needs network access, and each record test fails if its provider's variables are
-missing (set them e.g. in an untracked `mise.local.toml` `[env]` section):
+The config file is TOML and must not be readable by group/others
+(`chmod 600`). Each `[provider.<name>]` table is one domain on one provider;
+the public IPs are resolved once per check and pushed to all of them. `type`
+defaults to the table's name. Top-level settings must come before the first
+provider table; `ipv4`, `ipv6`, `ttl`, `max_records` and `replace_only` are
+defaults that each provider can override.
 
-| Provider | Variable | |
-|---|---|---|
-| Cloudflare | `DDNS_CLOUDFLARE_API_TOKEN` | API token with `Zone:Read` and `DNS:Edit` |
-| | `DDNS_CLOUDFLARE_ZONE` | zone to test in, e.g. `example.com` |
-| | `DDNS_CLOUDFLARE_TEST_DOMAIN` | optional; default `ddns-clients-test-<unix-seconds>.<zone>` |
-| No-IP | `DDNS_NOIP_USERNAME` | account username |
-| | `DDNS_NOIP_PASSWORD` | account password |
-| | `DDNS_NOIP_HOSTNAME` | existing hostname with exactly one A record, e.g. `myhost.ddns.net` |
+```toml
+interval = 300                 # seconds between checks, default 300
+resolvers = [                  # tried in order per family; default: icanhazip, local
+  { type = "icanhazip" },
+  { type = "ipify" },
+  # any service echoing the client IP as plain text
+  { type = "http", ipv4_url = "https://ipv4.example.net", ipv6_url = "https://ipv6.example.net" },
+  { type = "local" },          # Linux only: global addresses of local interfaces
+]
+ipv4 = true                    # default true
+ipv6 = true                    # default true
+ttl = 600                      # 0 = provider default; default 600
+max_records = 2                # max A/AAAA records kept, default 2
+replace_only = false           # only re-point existing records, never create or
+                               # delete any (e.g. records set up by hand); default false
 
-```sh
-mise run test-live
-# or: cargo test -p ddns-clients --test live -- --include-ignored --nocapture
-mise run test-live noip   # only one provider's tests
+[provider.home]
+type = "cloudflare"
+api_token = "..."              # needs Zone:Read and DNS:Edit
+zone = "example.com"
+domain = "home.example.com"    # optional, default <hostname>.<zone>
+
+[provider.noip]                # type = "noip" from the name
+username = "..."               # account email/username, or a DDNS key's username
+password = "..."
+user_agent = "..."             # optional; No-IP asks for "Company Program/Version contact@example.com"
+domain = "myhost.ddns.net"     # required
+ipv6 = false                   # overrides the default
 ```
 
-The Cloudflare record test creates, updates and deletes A/AAAA records on the
-test domain and cleans up after itself, even on failure. The No-IP record test
-points the hostname's A record at a documentation address (`192.0.2.10`) and
-then restores it; if it fails in between, restore the address in the No-IP
-dashboard.
+The provider keys are passed to `DynDnsClient`, so the daemon rejects unknown
+types and missing or unused keys at startup.
+
+When a provider rejects an update in a way only the user can fix (e.g.
+No-IP's `badauth`, `nohost`, `abuse`), the daemon logs an error and stops
+updating that provider; it exits once every provider has been rejected. After
+server errors it waits as long as the provider asks (30 minutes for No-IP)
+before updating that provider again.
+
+Log level is controlled with `RUST_LOG` (default `info`).

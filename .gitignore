@@ -2,7 +2,7 @@
 .DS_Store
 target
 **/*.rs.bk
-config.yaml
+config.toml
 .act_artifacts
 .act_cache
 mise.local.toml

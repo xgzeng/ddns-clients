@@ -2,7 +2,7 @@
 rust = "latest"
 
 [tasks.test-live]
-description = "Run the live tests against real provider APIs (see README for the variables)"
+description = "Run the live tests against real provider APIs (see DEVELOPMENT.md for the variables)"
 run = "cargo test -p ddns-clients --test live -- --include-ignored --nocapture"
 
 [tasks.deb]
