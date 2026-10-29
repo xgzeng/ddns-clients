@@ -3,16 +3,19 @@
 //! A [`DynDnsProvider`] changes the A/AAAA records of a domain on one DNS
 //! service:
 //!
-//! - [`CloudflareProvider`](cloudflare::CloudflareProvider) (feature `cloudflare`).
-//! - [`NoIpProvider`](noip::NoIpProvider) (feature `noip`).
+//! - [`CloudflareProvider`](cloudflare::CloudflareProvider).
+//! - [`NoIpProvider`](noip::NoIpProvider).
 //!
 //! Records are identified by their address; provider-internal record ids
 //! never leave the implementation.
 
-#[cfg(feature = "cloudflare")]
 pub mod cloudflare;
-#[cfg(feature = "noip")]
 pub mod noip;
+
+/// Name of the Cloudflare provider for [`DynDnsClient::provider`](crate::DynDnsClient::provider).
+pub const CLOUDFLARE: &str = "cloudflare";
+/// Name of the No-IP provider for [`DynDnsClient::provider`](crate::DynDnsClient::provider).
+pub const NOIP: &str = "noip";
 
 use std::net::IpAddr;
 

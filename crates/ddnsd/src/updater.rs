@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use ddns_clients::{DynDnsProvider, Result, UpdateSummary};
+use ddns_clients::{DynDnsClient, Result, UpdateSummary};
 
 /// Settings for an [`Updater`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,8 +9,6 @@ pub struct UpdaterOptions {
     pub ipv4: bool,
     /// Manage AAAA records.
     pub ipv6: bool,
-    /// TTL for created/updated records; `None` uses the provider's default.
-    pub ttl: Option<u32>,
     /// Maximum number of address records kept for the domain.
     pub max_records: usize,
 }
@@ -20,30 +18,28 @@ impl Default for UpdaterOptions {
         UpdaterOptions {
             ipv4: true,
             ipv6: true,
-            ttl: None,
             max_records: 2,
         }
     }
 }
 
-/// Keeps the address records of one domain in sync with a set of IPs.
+/// Keeps the address records of the client's domain in sync with a set of
+/// IPs.
 ///
 /// Records are cached between calls and only re-fetched from the provider
 /// after a failed update.
-pub struct Updater<P> {
-    provider: P,
-    domain: String,
+pub struct Updater {
+    client: DynDnsClient,
     options: UpdaterOptions,
     records: Vec<IpAddr>, // cache existing dns records
     records_dirty: bool,
 }
 
-impl<P: DynDnsProvider> Updater<P> {
-    /// Creates an updater managing `domain` through `provider`.
-    pub fn new(provider: P, domain: impl Into<String>, options: UpdaterOptions) -> Self {
+impl Updater {
+    /// Creates an updater managing the domain of `client`.
+    pub fn new(client: DynDnsClient, options: UpdaterOptions) -> Self {
         Updater {
-            provider,
-            domain: domain.into(),
+            client,
             options,
             records: vec![],
             records_dirty: true,
@@ -59,9 +55,9 @@ impl<P: DynDnsProvider> Updater<P> {
 
     async fn refresh_records(&mut self) -> Result<()> {
         log::info!("refresh dns records");
-        let mut records = self.provider.list(&self.domain).await?;
+        let mut records = self.client.list().await?;
         records.retain(|ip| self.is_enabled(ip));
-        log::info!("{} have {} records: ", self.domain, records.len());
+        log::info!("{} have {} records: ", self.client.domain(), records.len());
         for ip in &records {
             log::info!("    {ip}");
         }
@@ -109,11 +105,10 @@ impl<P: DynDnsProvider> Updater<P> {
         let desired: Vec<IpAddr> = keep.into_iter().chain(add).collect();
         // re-adding the kept addresses drops duplicate records of them
         let summary = self
-            .provider
-            .update(&self.domain)
+            .client
+            .update()
             .remove_all(stale)
             .add_all(desired.iter().copied())
-            .ttl(self.options.ttl)
             .send()
             .await?;
         self.records = desired;
@@ -143,9 +138,13 @@ fn diff_records(records: &[IpAddr], ips: &[IpAddr]) -> (Vec<IpAddr>, Vec<IpAddr>
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use async_trait::async_trait;
-    use ddns_clients::{Error, RecordUpdate, UpdateBuilder, providers::plan_changes};
+    use ddns_clients::{
+        DynDnsProvider, Error, RecordUpdate, UpdateBuilder, providers::plan_changes,
+    };
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
@@ -156,16 +155,16 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MockProvider {
+    struct MockState {
         records: Vec<(String, IpAddr)>,
         next_id: usize,
         fail_next: bool,
         list_calls: usize,
     }
 
-    impl MockProvider {
+    impl MockState {
         fn with(records: Vec<(String, IpAddr)>) -> Self {
-            MockProvider {
+            MockState {
                 records,
                 ..Default::default()
             }
@@ -185,12 +184,16 @@ mod tests {
         }
     }
 
+    /// The provider half of a mock; the test keeps the state to inspect it.
+    struct MockProvider(Arc<Mutex<MockState>>);
+
     #[async_trait]
     impl DynDnsProvider for MockProvider {
         async fn list(&mut self, _domain: &str) -> Result<Vec<IpAddr>> {
-            self.list_calls += 1;
-            self.check_fail()?;
-            Ok(self.records.iter().map(|(_, ip)| *ip).collect())
+            let mut state = self.0.lock().unwrap();
+            state.list_calls += 1;
+            state.check_fail()?;
+            Ok(state.records.iter().map(|(_, ip)| *ip).collect())
         }
 
         fn update<'a>(&'a mut self, domain: &str) -> UpdateBuilder<'a> {
@@ -198,22 +201,30 @@ mod tests {
         }
 
         async fn apply_update(&mut self, update: RecordUpdate) -> Result<UpdateSummary> {
-            self.check_fail()?;
-            let plan = plan_changes(&self.records, &update);
+            let state = &mut *self.0.lock().unwrap();
+            state.check_fail()?;
+            let plan = plan_changes(&state.records, &update);
             for (id, ip) in &plan.repoint {
-                self.records.iter_mut().find(|(i, _)| i == id).unwrap().1 = *ip;
+                state.records.iter_mut().find(|(i, _)| i == id).unwrap().1 = *ip;
             }
-            self.records.retain(|(id, _)| !plan.delete.contains(id));
+            state.records.retain(|(id, _)| !plan.delete.contains(id));
             for ip in &plan.create {
-                self.next_id += 1;
-                self.records.push((format!("new{}", self.next_id), *ip));
+                state.next_id += 1;
+                state.records.push((format!("new{}", state.next_id), *ip));
             }
             Ok(plan.summary())
         }
     }
 
-    fn updater(provider: MockProvider, options: UpdaterOptions) -> Updater<MockProvider> {
-        Updater::new(provider, "host.example.com", options)
+    /// An updater on a mock provider starting with `state`, and the shared
+    /// mock state.
+    fn updater(state: MockState, options: UpdaterOptions) -> (Updater, Arc<Mutex<MockState>>) {
+        let state = Arc::new(Mutex::new(state));
+        let client = DynDnsClient::custom(MockProvider(state.clone()))
+            .domain("host.example.com")
+            .build()
+            .unwrap();
+        (Updater::new(client, options), state)
     }
 
     #[test]
@@ -237,8 +248,8 @@ mod tests {
 
     #[tokio::test]
     async fn unchanged() {
-        let provider = MockProvider::with(vec![rec("a", "1.1.1.1")]);
-        let mut u = updater(provider, UpdaterOptions::default());
+        let state = MockState::with(vec![rec("a", "1.1.1.1")]);
+        let (mut u, _) = updater(state, UpdaterOptions::default());
         let summary = u.update_ips(&[ip("1.1.1.1")]).await.unwrap();
         assert!(summary.is_unchanged());
         assert_eq!(summary.kept, 1);
@@ -246,20 +257,23 @@ mod tests {
 
     #[tokio::test]
     async fn creates_missing() {
-        let mut u = updater(MockProvider::default(), UpdaterOptions::default());
+        let (mut u, mock) = updater(MockState::default(), UpdaterOptions::default());
         let summary = u
             .update_ips(&[ip("1.1.1.1"), ip("2001:4860::1")])
             .await
             .unwrap();
         assert_eq!(summary.created, 2);
-        assert_eq!(u.provider.ips(), vec![ip("1.1.1.1"), ip("2001:4860::1")]);
+        assert_eq!(
+            mock.lock().unwrap().ips(),
+            vec![ip("1.1.1.1"), ip("2001:4860::1")]
+        );
         assert_eq!(u.records.len(), 2);
     }
 
     #[tokio::test]
     async fn replaces_via_update() {
-        let provider = MockProvider::with(vec![rec("a", "1.1.1.1")]);
-        let mut u = updater(provider, UpdaterOptions::default());
+        let state = MockState::with(vec![rec("a", "1.1.1.1")]);
+        let (mut u, mock) = updater(state, UpdaterOptions::default());
         let summary = u.update_ips(&[ip("2.2.2.2")]).await.unwrap();
         assert_eq!(
             summary,
@@ -268,25 +282,25 @@ mod tests {
                 ..Default::default()
             }
         );
-        assert_eq!(u.provider.records, vec![rec("a", "2.2.2.2")]);
+        assert_eq!(mock.lock().unwrap().records, vec![rec("a", "2.2.2.2")]);
     }
 
     #[tokio::test]
     async fn deletes_surplus() {
-        let provider = MockProvider::with(vec![rec("a", "1.1.1.1"), rec("b", "2.2.2.2")]);
-        let mut u = updater(provider, UpdaterOptions::default());
+        let state = MockState::with(vec![rec("a", "1.1.1.1"), rec("b", "2.2.2.2")]);
+        let (mut u, mock) = updater(state, UpdaterOptions::default());
         let summary = u.update_ips(&[ip("2.2.2.2")]).await.unwrap();
         assert_eq!(summary.deleted, 1);
-        assert_eq!(u.provider.records, vec![rec("b", "2.2.2.2")]);
+        assert_eq!(mock.lock().unwrap().records, vec![rec("b", "2.2.2.2")]);
     }
 
     #[tokio::test]
     async fn deletes_duplicates() {
-        let provider = MockProvider::with(vec![rec("a", "1.1.1.1"), rec("b", "1.1.1.1")]);
-        let mut u = updater(provider, UpdaterOptions::default());
+        let state = MockState::with(vec![rec("a", "1.1.1.1"), rec("b", "1.1.1.1")]);
+        let (mut u, mock) = updater(state, UpdaterOptions::default());
         let summary = u.update_ips(&[ip("1.1.1.1")]).await.unwrap();
         assert_eq!(summary.deleted, 1);
-        assert_eq!(u.provider.records, vec![rec("a", "1.1.1.1")]);
+        assert_eq!(mock.lock().unwrap().records, vec![rec("a", "1.1.1.1")]);
     }
 
     #[tokio::test]
@@ -295,44 +309,47 @@ mod tests {
             max_records: 1,
             ..Default::default()
         };
-        let mut u = updater(MockProvider::default(), options);
+        let (mut u, mock) = updater(MockState::default(), options);
         let summary = u.update_ips(&[ip("1.1.1.1"), ip("2.2.2.2")]).await.unwrap();
         assert_eq!(summary.created, 1);
-        assert_eq!(u.provider.records.len(), 1);
+        assert_eq!(mock.lock().unwrap().records.len(), 1);
     }
 
     #[tokio::test]
     async fn ignores_disabled_family() {
-        let provider = MockProvider::with(vec![rec("a", "1.1.1.1")]);
+        let state = MockState::with(vec![rec("a", "1.1.1.1")]);
         let options = UpdaterOptions {
             ipv4: false,
             ..Default::default()
         };
-        let mut u = updater(provider, options);
+        let (mut u, mock) = updater(state, options);
         let summary = u
             .update_ips(&[ip("2.2.2.2"), ip("2001:4860::1")])
             .await
             .unwrap();
         assert_eq!(summary.created, 1);
         assert_eq!(summary.deleted + summary.updated, 0);
-        assert_eq!(u.provider.ips(), vec![ip("1.1.1.1"), ip("2001:4860::1")]);
+        assert_eq!(
+            mock.lock().unwrap().ips(),
+            vec![ip("1.1.1.1"), ip("2001:4860::1")]
+        );
     }
 
     #[tokio::test]
     async fn refreshes_after_failure() {
-        let mut u = updater(MockProvider::default(), UpdaterOptions::default());
+        let (mut u, mock) = updater(MockState::default(), UpdaterOptions::default());
         u.update_ips(&[ip("1.1.1.1")]).await.unwrap();
-        assert_eq!(u.provider.list_calls, 1);
+        assert_eq!(mock.lock().unwrap().list_calls, 1);
 
         // cached records are reused while updates succeed
         u.update_ips(&[ip("1.1.1.1")]).await.unwrap();
-        assert_eq!(u.provider.list_calls, 1);
+        assert_eq!(mock.lock().unwrap().list_calls, 1);
 
-        u.provider.fail_next = true;
+        mock.lock().unwrap().fail_next = true;
         u.update_ips(&[ip("2.2.2.2")]).await.unwrap_err();
 
         u.update_ips(&[ip("2.2.2.2")]).await.unwrap();
-        assert_eq!(u.provider.list_calls, 2);
-        assert_eq!(u.provider.records, vec![rec("new1", "2.2.2.2")]);
+        assert_eq!(mock.lock().unwrap().list_calls, 2);
+        assert_eq!(mock.lock().unwrap().records, vec![rec("new1", "2.2.2.2")]);
     }
 }

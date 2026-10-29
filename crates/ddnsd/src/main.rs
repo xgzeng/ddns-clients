@@ -6,11 +6,11 @@ use std::{path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use clap::Parser;
 use ddns_clients::{
-    CloudflareProvider, DynDnsProvider, Error, IpResolver, NoIpProvider,
+    Error, IpResolver,
     resolve::{self, IpFamily},
 };
 
-use config::{Config, ProviderConfig};
+use config::Config;
 use updater::{Updater, UpdaterOptions};
 
 /// Dynamic DNS daemon: keeps a domain's A/AAAA records pointed at this host.
@@ -30,36 +30,13 @@ async fn main() -> Result<()> {
     let config = Config::load(&args.config)
         .with_context(|| format!("load {} failed", args.config.display()))?;
 
-    match &config.provider {
-        ProviderConfig::Cloudflare { api_token, zone } => {
-            run(
-                CloudflareProvider::new(api_token.as_str(), zone.as_str())?,
-                &config,
-            )
-            .await
-        }
-        ProviderConfig::NoIp {
-            username,
-            password,
-            user_agent,
-        } => {
-            let provider = match user_agent {
-                Some(user_agent) => NoIpProvider::with_user_agent(username, password, user_agent)?,
-                None => NoIpProvider::new(username, password)?,
-            };
-            run(provider, &config).await
-        }
-    }
-}
-
-async fn run<P: DynDnsProvider>(provider: P, config: &Config) -> Result<()> {
     let mut updater = Updater::new(
-        provider,
-        config.domain(),
+        config
+            .client()
+            .with_context(|| format!("invalid provider in {}", args.config.display()))?,
         UpdaterOptions {
             ipv4: config.ipv4,
             ipv6: config.ipv6,
-            ttl: config.ttl(),
             max_records: config.max_records,
         },
     );
@@ -83,10 +60,10 @@ async fn run<P: DynDnsProvider>(provider: P, config: &Config) -> Result<()> {
     }
 }
 
-async fn update_once<R: IpResolver, P: DynDnsProvider>(
+async fn update_once<R: IpResolver>(
     resolver: &R,
     families: &[IpFamily],
-    updater: &mut Updater<P>,
+    updater: &mut Updater,
 ) -> Result<()> {
     let addrs = resolve::resolve_public_ips(resolver, families).await;
     if addrs.is_empty() {

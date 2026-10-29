@@ -11,12 +11,12 @@ A multi-provider dynamic DNS client library and daemon written in Rust.
 | `ddns-clients` | `crates/ddns-clients` | Library: `IpResolver` trait and resolvers, `DynDnsProvider` trait and providers |
 | `ddnsd` | `crates/ddnsd` | Daemon that periodically syncs a domain's A/AAAA records (owns the record-reconciliation `Updater`) |
 
-DNS providers (features on by default):
+DNS providers:
 
-| Provider | Feature | Notes |
-|---|---|---|
-| Cloudflare | `cloudflare` | API token with `Zone:Read` and `DNS:Edit` |
-| No-IP | `noip` | at most one A and one AAAA record per hostname, which can be re-pointed but not removed; TTL is ignored; current records are read via DNS |
+| Provider | Notes |
+|---|---|
+| Cloudflare | API token with `Zone:Read` and `DNS:Edit` |
+| No-IP | at most one A and one AAAA record per hostname, which can be re-pointed but not removed; TTL is ignored; current records are read via DNS |
 
 IP resolvers: HTTP echo services (icanhazip, ipify, or custom URLs) and local
 interfaces via netlink (Linux). A `Vec` of resolvers falls back in order, per
@@ -25,30 +25,43 @@ address family.
 ## Library
 
 ```rust
-use ddns_clients::{CloudflareProvider, DynDnsProvider, resolve};
+use ddns_clients::{DynDnsClient, providers, resolve};
 
-let mut provider = CloudflareProvider::new("api-token", "example.com")?;
+let mut client = DynDnsClient::provider(providers::CLOUDFLARE)? // or "cloudflare"
+    .api_token("api-token")
+    .zone("example.com")
+    .domain("myhost.example.com")
+    .ttl(Some(300))
+    .build()?;
 let resolvers = resolve::default_resolvers(); // icanhazip, then local interfaces
 let ips = resolve::resolve_public_ips(&resolvers, &[resolve::IpFamily::V4]).await;
 
 // replace the domain's A records with the resolved addresses
-let current = provider.list("myhost.example.com").await?;
-let summary = provider
-    .update("myhost.example.com")
+let current = client.list().await?;
+let summary = client
+    .update()
     .remove_all(current.into_iter().filter(|ip| ip.is_ipv4()))
     .add_all(ips)
-    .ttl(Some(300))
     .send()
     .await?;
 ```
+
+`build()` fails if a required parameter is missing or a parameter isn't used
+by the provider:
+
+| Provider | Required | Optional |
+|---|---|---|
+| `cloudflare` | `api_token`, `zone`, `domain` | `ttl` |
+| `noip` | `username`, `password`, `domain` | `user_agent`, `ttl` |
 
 Records are identified by address. One `update` can `add`/`add_all` and
 `remove`/`remove_all` several addresses, or `clear` all existing ones; existing
 records are re-pointed where possible, so provider-side settings survive.
 
 To add a DNS provider, implement `ddns_clients::providers::DynDnsProvider` (`list`,
-`update`, `apply_update`; `providers::plan_changes` computes the record operations);
-to add an IP source, implement `ddns_clients::IpResolver`.
+`update`, `apply_update`; `providers::plan_changes` computes the record operations)
+and wrap it with `DynDnsClient::custom(provider).domain(..).build()`, or use it
+directly; to add an IP source, implement `ddns_clients::IpResolver`.
 
 ## Daemon
 

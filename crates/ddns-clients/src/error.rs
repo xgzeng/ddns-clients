@@ -46,6 +46,11 @@ pub enum Error {
     /// The provider cannot make the requested change.
     #[error("unsupported update: {0}")]
     Unsupported(String),
+
+    /// A [`DynDnsClient`](crate::DynDnsClient) was configured incorrectly,
+    /// e.g. with an unknown provider or a missing parameter.
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 impl Error {

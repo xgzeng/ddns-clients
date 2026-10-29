@@ -1,31 +1,26 @@
 use std::{fs::File, os::unix::fs::PermissionsExt, path::Path};
 
 use anyhow::{Result, bail};
-use ddns_clients::resolve::{AnyResolver, HttpResolver, IpFamily};
+use ddns_clients::{
+    DynDnsClient,
+    resolve::{AnyResolver, HttpResolver, IpFamily},
+};
 
+/// Provider parameters, passed on to [`DynDnsClient::provider`] which checks
+/// which ones the provider needs.
 #[derive(Debug, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
-pub enum ProviderConfig {
-    Cloudflare {
-        api_token: String,
-        zone: String,
-    },
-    NoIp {
-        username: String,
-        password: String,
-        /// No-IP asks for `Company NameOfProgram/Version maintainer-contact@example.com`.
-        user_agent: Option<String>,
-    },
-}
-
-impl ProviderConfig {
-    /// The zone that `<hostname>.<zone>` default domains belong to.
-    fn zone(&self) -> Option<&str> {
-        match self {
-            ProviderConfig::Cloudflare { zone, .. } => Some(zone),
-            ProviderConfig::NoIp { .. } => None,
-        }
-    }
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    /// Provider name, e.g. `cloudflare` or `noip`.
+    #[serde(rename = "type")]
+    pub name: String,
+    pub api_token: Option<String>,
+    /// Also the zone of `<hostname>.<zone>` default domains.
+    pub zone: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    /// No-IP asks for `Company NameOfProgram/Version maintainer-contact@example.com`.
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
@@ -91,13 +86,36 @@ impl Config {
             bail!("resolvers must not be empty");
         }
         if config.domain.is_none() {
-            let Some(zone) = config.provider.zone() else {
+            let Some(zone) = &config.provider.zone else {
                 bail!("domain must be set for this provider");
             };
             log::info!("domain is not set, use <hostname>.<zone> as domain");
             config.domain = Some(format!("{}.{zone}", hostname::get()?.to_string_lossy()));
         }
         Ok(config)
+    }
+
+    /// Creates the client for the configured provider and domain; fails if
+    /// the provider is unknown or its parameters are missing or unused.
+    pub fn client(&self) -> Result<DynDnsClient> {
+        let provider = &self.provider;
+        let mut builder = DynDnsClient::provider(&provider.name)?;
+        if let Some(api_token) = &provider.api_token {
+            builder = builder.api_token(api_token);
+        }
+        if let Some(zone) = &provider.zone {
+            builder = builder.zone(zone);
+        }
+        if let Some(username) = &provider.username {
+            builder = builder.username(username);
+        }
+        if let Some(password) = &provider.password {
+            builder = builder.password(password);
+        }
+        if let Some(user_agent) = &provider.user_agent {
+            builder = builder.user_agent(user_agent);
+        }
+        Ok(builder.domain(self.domain()).ttl(self.ttl()).build()?)
     }
 
     /// The domain to update; always set after [`Config::load`].
@@ -194,11 +212,10 @@ resolvers:
         let config = Config::load(&path).unwrap();
         fs::remove_file(path).unwrap();
 
-        let ProviderConfig::Cloudflare { api_token, zone } = &config.provider else {
-            panic!("unexpected provider {:?}", config.provider);
-        };
-        assert_eq!(api_token, "secret");
-        assert_eq!(zone, "example.com");
+        assert_eq!(config.provider.name, "cloudflare");
+        config.client().unwrap();
+        assert_eq!(config.provider.api_token.as_deref(), Some("secret"));
+        assert_eq!(config.provider.zone.as_deref(), Some("example.com"));
         assert_eq!(config.domain(), "myhost.example.com");
         assert!(!config.ipv4);
         assert!(config.ipv6);
@@ -269,17 +286,11 @@ provider:
         );
         let config = Config::load(&path).unwrap();
         fs::remove_file(path).unwrap();
-        let ProviderConfig::NoIp {
-            username,
-            password,
-            user_agent,
-        } = &config.provider
-        else {
-            panic!("unexpected provider {:?}", config.provider);
-        };
-        assert_eq!(username, "me@example.com");
-        assert_eq!(password, "secret");
-        assert_eq!(user_agent, &None);
+        assert_eq!(config.provider.name, "noip");
+        config.client().unwrap();
+        assert_eq!(config.provider.username.as_deref(), Some("me@example.com"));
+        assert_eq!(config.provider.password.as_deref(), Some("secret"));
+        assert_eq!(config.provider.user_agent, None);
         assert_eq!(config.domain(), "myhost.ddns.net");
 
         let path = write_config("noip-nodomain", provider, 0o600);
@@ -290,8 +301,36 @@ provider:
 
     #[test]
     fn rejects_unknown_provider() {
-        let path = write_config("unknown", "provider:\n  type: nope\n", 0o600);
-        assert!(Config::load(&path).is_err());
+        let path = write_config(
+            "unknown",
+            "provider:\n  type: nope\ndomain: myhost.example.com\n",
+            0o600,
+        );
+        let config = Config::load(&path).unwrap();
         fs::remove_file(path).unwrap();
+        let err = config.client().unwrap_err();
+        assert!(err.to_string().contains("unknown provider"), "{err}");
+    }
+
+    #[test]
+    fn rejects_bad_provider_parameters() {
+        let path = write_config(
+            "badparams",
+            "
+provider:
+  type: cloudflare
+  zone: example.com
+  username: me
+",
+            0o600,
+        );
+        let config = Config::load(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        let err = config.client().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cloudflare: missing api_token; username is not used"),
+            "{err}"
+        );
     }
 }

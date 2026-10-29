@@ -14,7 +14,6 @@
 //! - No-IP: `DDNS_NOIP_USERNAME`, `DDNS_NOIP_PASSWORD` and
 //!   `DDNS_NOIP_HOSTNAME` (an existing hostname with one A record). The
 //!   hostname's A record is pointed at a test address and then restored.
-#![cfg(any(feature = "cloudflare", feature = "noip"))]
 
 use std::net::IpAddr;
 
@@ -46,7 +45,6 @@ fn summary(kept: usize, updated: usize, deleted: usize, created: usize) -> Updat
     }
 }
 
-#[cfg(feature = "cloudflare")]
 mod cloudflare {
     use std::{
         net::IpAddr,
@@ -175,7 +173,6 @@ mod cloudflare {
     }
 }
 
-#[cfg(feature = "noip")]
 mod noip {
     use std::net::IpAddr;
 
