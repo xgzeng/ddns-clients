@@ -76,12 +76,13 @@ client.update(ips).await?; // replaces the domain's A/AAAA records
 
 ```sh
 ddnsd -c /etc/ddnsd.toml           # the default path
-sudo ddnsd dry-run                 # show what each provider's records would become
+sudo ddnsd dry-run                 # one update pass that only logs the changes
 ```
 
-`dry-run` resolves the public IPs once and, for each provider, prints the
-current records and the changes an update would make, without making them. It
-only reads from the providers, and exits with an error if any of them failed.
+`dry-run` runs one update pass without changing any records: the planned
+changes are logged (e.g. `myhost.example.com: replace 192.0.2.1 with
+192.0.2.2 (dry run, not carried out)`), the providers are only read from, and
+it exits with an error if any of them failed.
 
 The config file is TOML and must not be readable by group/others
 (`chmod 600`). Each `[provider.<name>]` table is one domain on one provider;

@@ -5,7 +5,7 @@
 | Path | |
 |---|---|
 | `crates/ddns-clients` | Library: `IpResolver` trait and resolvers (`resolve/`); `DynDnsProvider` trait with the primitive record operations on one domain, and the providers with their record caches (`providers/`); `DynDnsClient`, which plans the operations (`client/plan.rs`) and adds the address-family restriction and `replace_only`, and its builder (`client.rs`) |
-| `crates/ddnsd` | Daemon: TOML config (`config.rs`), the `Updater` that keeps a domain at the resolved IPs within `max_records` (`updater.rs`), and the per-provider update loop (`main.rs`) |
+| `crates/ddnsd` | Daemon: TOML config (`config.rs`), and the `Daemon` (`main.rs`) that keeps every provider's domain at the resolved IPs within `max_records`, with its update loop, periodic refresh and `dry-run` |
 | `debian/` | Debian packaging of `ddnsd` |
 | `scripts/` | Helper scripts, e.g. `build-deb.sh` |
 | `.github/workflows/` | CI and releases |

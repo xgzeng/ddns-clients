@@ -2,6 +2,8 @@ mod plan;
 
 use std::{fmt, net::IpAddr};
 
+use plan::Operation;
+
 use crate::{
     CloudflareProvider, DynDnsProvider, Error, NoIpProvider, Result,
     providers::{CLOUDFLARE, NOIP},
@@ -29,14 +31,6 @@ use crate::{
 ///
 /// // the domain's records are now exactly these
 /// client.update(["192.0.2.1".parse().unwrap()]).await?;
-///
-/// // re-point one record, keep the others
-/// client
-///     .update_request()
-///     .remove("192.0.2.1".parse().unwrap())
-///     .add("192.0.2.2".parse().unwrap())
-///     .send()
-///     .await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -48,6 +42,8 @@ pub struct DynDnsClient {
     ipv6: bool,
     /// Only re-point existing records, never add or delete any.
     replace_only: bool,
+    /// Plan and log the operations, but don't carry them out.
+    dry_run: bool,
 }
 
 impl DynDnsClient {
@@ -90,6 +86,7 @@ impl DynDnsClient {
             ipv4: true,
             ipv6: true,
             replace_only: false,
+            dry_run: false,
         }
     }
 
@@ -116,6 +113,13 @@ impl DynDnsClient {
     pub fn replace_only(mut self, enabled: bool) -> Self {
         self.replace_only = enabled;
         self
+    }
+
+    /// In dry-run mode, updates plan and log their operations (`replace A
+    /// with B`, `delete A`, `add A`) without making the provider carry them
+    /// out. Listing records still reads them from the provider.
+    pub fn set_dryrun(&mut self, enabled: bool) {
+        self.dry_run = enabled;
     }
 
     /// Whether records of `family` are managed.
@@ -145,20 +149,6 @@ impl DynDnsClient {
         self.provider.refresh().await
     }
 
-    /// Starts a batched change of the domain's address records, with the
-    /// client's TTL preset; [`UpdateRequestBuilder::ttl`] overrides it.
-    /// Addresses of disabled families are ignored, and a
-    /// [`replace_only`](Self::replace_only) client only re-points records.
-    pub fn update_request(&mut self) -> UpdateRequestBuilder<'_> {
-        let ttl = self.ttl;
-        UpdateRequestBuilder {
-            client: self,
-            add: vec![],
-            remove: vec![],
-            ttl,
-        }
-    }
-
     /// Replaces the domain's records of the enabled families with `ips`:
     /// existing records not in `ips` are re-pointed or deleted, and missing
     /// ones added. Addresses and records of disabled families are left
@@ -175,141 +165,52 @@ impl DynDnsClient {
     /// Empty `ips` remove all records of the enabled families.
     pub async fn update(&mut self, ips: impl IntoIterator<Item = IpAddr>) -> Result<UpdateSummary> {
         let existing = self.list().await?;
-        let remove = existing.clone();
-        let prepared = self.prepare(existing, ips.into_iter().collect(), remove);
-        self.execute(prepared, self.ttl).await
+        let ops = self.plan(&existing, ips);
+        self.execute(&ops).await?;
+        Ok(plan::summary(existing.len(), &ops))
     }
 
-    /// What [`update`](Self::update) with `ips` would change, without
-    /// changing anything.
-    pub async fn preview_update(
-        &mut self,
-        ips: impl IntoIterator<Item = IpAddr>,
-    ) -> Result<UpdatePreview> {
-        let existing = self.list().await?;
-        let remove = existing.clone();
-        Ok(self
-            .prepare(existing, ips.into_iter().collect(), remove)
-            .preview)
-    }
-
-    /// Plans adding `add` and removing `remove` on the `existing` records,
-    /// within the enabled families and `replace_only`.
-    fn prepare(&self, existing: Vec<IpAddr>, add: Vec<IpAddr>, remove: Vec<IpAddr>) -> Prepared {
-        let enabled = |ip: &IpAddr| self.is_enabled(IpFamily::of(ip));
-        if !add.iter().chain(&remove).all(enabled) {
-            log::debug!("{}: ignoring addresses of disabled families", self.domain());
-        }
+    /// The operations that turn the `existing` records into `ips`, within
+    /// the enabled families and `replace_only`.
+    fn plan(&self, existing: &[IpAddr], ips: impl IntoIterator<Item = IpAddr>) -> Vec<Operation> {
         let mut desired: Vec<IpAddr> = vec![];
-        for ip in add {
-            if enabled(&ip) && !desired.contains(&ip) {
+        for ip in ips {
+            if !self.is_enabled(IpFamily::of(&ip)) {
+                log::debug!("{}: ignoring {ip} of a disabled family", self.domain());
+            } else if !desired.contains(&ip) {
                 desired.push(ip);
             }
         }
-        let request = plan::Request {
-            add: desired,
-            remove: remove.into_iter().filter(enabled).collect(),
-            replace_only: self.replace_only,
-        };
-        let plan = plan::plan(&existing, &request);
-        let after = plan.after(&existing);
+        let ops = plan::plan(existing, &desired, self.replace_only);
 
-        let skipped: Vec<&IpAddr> = request
-            .add
-            .iter()
-            .filter(|ip| !after.contains(ip))
-            .collect();
+        let after = plan::apply(existing, &ops);
+        let skipped: Vec<&IpAddr> = desired.iter().filter(|ip| !after.contains(ip)).collect();
         if !skipped.is_empty() {
             log::warn!(
                 "{}: no record left to re-point at {skipped:?} (replace only)",
                 self.domain()
             );
         }
-        Prepared {
-            preview: UpdatePreview {
-                before: existing,
-                after,
-                summary: plan.summary(),
-            },
-            plan,
+        ops
+    }
+
+    /// Carries out `ops` in order, or only logs them in dry-run mode.
+    async fn execute(&mut self, ops: &[Operation]) -> Result<()> {
+        for op in ops {
+            if self.dry_run {
+                log::info!("{}: {op} (dry run, not carried out)", self.domain());
+                continue;
+            }
+            match *op {
+                Operation::Replace { old, new } => {
+                    self.provider.replace(old, new, self.ttl).await?
+                }
+                Operation::Delete(ip) => self.provider.delete(ip).await?,
+                Operation::Add(ip) => self.provider.add(ip, self.ttl).await?,
+            }
+            log::info!("{}: {op}", self.domain());
         }
-    }
-
-    /// Carries out a plan: re-points, then deletes, then adds records.
-    async fn execute(&mut self, prepared: Prepared, ttl: Option<u32>) -> Result<UpdateSummary> {
-        let Prepared { plan, preview } = prepared;
-        for (i, new) in &plan.replace {
-            let old = preview.before[*i];
-            self.provider.replace(old, *new, ttl).await?;
-            log::debug!("{}: re-pointed {old} to {new}", self.domain());
-        }
-        for i in &plan.delete {
-            let ip = preview.before[*i];
-            self.provider.delete(ip).await?;
-            log::debug!("{}: deleted {ip}", self.domain());
-        }
-        for ip in &plan.add {
-            self.provider.add(*ip, ttl).await?;
-            log::debug!("{}: added {ip}", self.domain());
-        }
-        Ok(preview.summary)
-    }
-}
-
-/// Builds and sends a batched change of a [`DynDnsClient`]'s records; see
-/// [`DynDnsClient::update_request`].
-///
-/// Afterwards the domain has exactly the addresses `add ∪ (existing − remove)`.
-/// Removing an absent address and adding a present one are no-ops.
-#[must_use = "an update does nothing until `send` is awaited"]
-pub struct UpdateRequestBuilder<'a> {
-    client: &'a mut DynDnsClient,
-    add: Vec<IpAddr>,
-    remove: Vec<IpAddr>,
-    ttl: Option<u32>,
-}
-
-impl UpdateRequestBuilder<'_> {
-    /// Ensures a record with `ip` exists.
-    #[allow(clippy::should_implement_trait)] // a builder step, not arithmetic
-    pub fn add(mut self, ip: IpAddr) -> Self {
-        self.add.push(ip);
-        self
-    }
-
-    /// Ensures records with each of `ips` exist.
-    pub fn add_all(mut self, ips: impl IntoIterator<Item = IpAddr>) -> Self {
-        self.add.extend(ips);
-        self
-    }
-
-    /// Removes the record with `ip`, if any.
-    pub fn remove(mut self, ip: IpAddr) -> Self {
-        self.remove.push(ip);
-        self
-    }
-
-    /// Removes the records with each of `ips`, if any.
-    pub fn remove_all(mut self, ips: impl IntoIterator<Item = IpAddr>) -> Self {
-        self.remove.extend(ips);
-        self
-    }
-
-    /// Sets the TTL of added and changed records; `None` uses the provider's
-    /// default.
-    pub fn ttl(mut self, ttl: Option<u32>) -> Self {
-        self.ttl = ttl;
-        self
-    }
-
-    /// Applies the change.
-    pub async fn send(self) -> Result<UpdateSummary> {
-        if self.add.is_empty() && self.remove.is_empty() {
-            return Ok(UpdateSummary::default());
-        }
-        let existing = self.client.list().await?;
-        let prepared = self.client.prepare(existing, self.add, self.remove);
-        self.client.execute(prepared, self.ttl).await
+        Ok(())
     }
 }
 
@@ -333,23 +234,6 @@ impl UpdateSummary {
     }
 }
 
-/// What a [`DynDnsClient::update`] would change; see
-/// [`DynDnsClient::preview_update`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpdatePreview {
-    /// The domain's addresses now (enabled families only).
-    pub before: Vec<IpAddr>,
-    /// The domain's addresses after the update.
-    pub after: Vec<IpAddr>,
-    /// The record changes the update would make.
-    pub summary: UpdateSummary,
-}
-
-struct Prepared {
-    plan: plan::Plan,
-    preview: UpdatePreview,
-}
-
 impl fmt::Debug for DynDnsClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DynDnsClient")
@@ -358,6 +242,7 @@ impl fmt::Debug for DynDnsClient {
             .field("ipv4", &self.ipv4)
             .field("ipv6", &self.ipv6)
             .field("replace_only", &self.replace_only)
+            .field("dry_run", &self.dry_run)
             .finish_non_exhaustive()
     }
 }
@@ -520,6 +405,7 @@ impl DynDnsClientBuilder {
             ipv4: self.ipv4,
             ipv6: self.ipv6,
             replace_only: self.replace_only,
+            dry_run: false,
         })
     }
 
@@ -778,34 +664,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_request_presets_ttl() {
-        let fake = Fake::default();
-        let mut client = DynDnsClient::new(fake.clone()).ttl(Some(120));
-
-        client
-            .update_request()
-            .add(ip("192.0.2.1"))
-            .send()
-            .await
-            .unwrap();
-        client
-            .update_request()
-            .add(ip("192.0.2.2"))
-            .ttl(None)
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(
-            fake.state().ops,
-            vec![
-                Op::Add(ip("192.0.2.1"), Some(120)),
-                Op::Add(ip("192.0.2.2"), None)
-            ]
-        );
-    }
-
-    #[tokio::test]
     async fn update_replaces_all() {
         let fake = Fake::with(&[ip("192.0.2.9")]);
         let mut client = DynDnsClient::new(fake.clone()).ttl(Some(120));
@@ -852,33 +710,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_request_ignores_disabled_family() {
-        let fake = Fake::with(&[ip("2001:db8::2")]);
-        let mut client = DynDnsClient::new(fake.clone()).enable_ipv6(false);
-
-        let summary = client
-            .update_request()
-            .add(ip("2001:db8::1"))
-            .send()
-            .await
-            .unwrap();
-        assert!(summary.is_unchanged());
-        assert!(fake.state().ops.is_empty());
-
-        client
-            .update_request()
-            .add(ip("192.0.2.1"))
-            .add(ip("2001:db8::1"))
-            .remove(ip("2001:db8::2"))
-            .send()
-            .await
-            .unwrap();
-        let state = fake.state();
-        assert_eq!(state.ops, vec![Op::Add(ip("192.0.2.1"), None)]);
-        assert_eq!(state.records, vec![ip("2001:db8::2"), ip("192.0.2.1")]);
-    }
-
-    #[tokio::test]
     async fn replace_only_keeps_record_count() {
         let fake = Fake::with(&[ip("192.0.2.9"), ip("2001:db8::9")]);
         let mut client = DynDnsClient::new(fake.clone()).replace_only(true);
@@ -896,15 +727,6 @@ mod tests {
         assert!(summary.is_unchanged());
         assert_eq!(fake.state().records.len(), 2);
         assert_eq!(fake.state().ops.len(), 2);
-
-        // update requests are restricted too
-        client
-            .update_request()
-            .add(ip("192.0.2.4"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(fake.state().ops.len(), 2);
     }
 
     #[tokio::test]
@@ -917,27 +739,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preview_changes_nothing() {
+    async fn dry_run_changes_nothing() {
+        let ips = [ip("192.0.2.1"), ip("2001:db8::1")];
         let fake = Fake::with(&[ip("192.0.2.9")]);
         let mut client = DynDnsClient::new(fake.clone());
+        client.set_dryrun(true);
 
-        let preview = client
-            .preview_update([ip("192.0.2.1"), ip("2001:db8::1")])
-            .await
-            .unwrap();
-        assert_eq!(preview.before, vec![ip("192.0.2.9")]);
-        assert_eq!(preview.after, vec![ip("192.0.2.1"), ip("2001:db8::1")]);
-        assert_eq!(preview.summary.updated, 1);
-        assert_eq!(preview.summary.created, 1);
+        let planned = client.update(ips).await.unwrap();
+        assert_eq!(planned.updated, 1);
+        assert_eq!(planned.created, 1);
         assert!(fake.state().ops.is_empty());
+        assert_eq!(fake.state().records, vec![ip("192.0.2.9")]);
 
-        // the update matches the preview
-        let summary = client
-            .update([ip("192.0.2.1"), ip("2001:db8::1")])
-            .await
-            .unwrap();
-        assert_eq!(summary, preview.summary);
-        assert_eq!(fake.state().records, preview.after);
+        // the real update does what was planned
+        client.set_dryrun(false);
+        assert_eq!(client.update(ips).await.unwrap(), planned);
+        assert_eq!(fake.state().records, ips);
     }
 
     #[tokio::test]

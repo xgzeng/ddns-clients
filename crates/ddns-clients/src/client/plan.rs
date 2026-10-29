@@ -1,130 +1,120 @@
-//! Planning: the record operations that turn a domain's records into the
-//! requested state.
+//! Planning: the provider operations that turn a domain's records into the
+//! desired addresses.
 
-use std::net::IpAddr;
+use std::{fmt, net::IpAddr};
 
 use crate::UpdateSummary;
 
-/// A change of one domain's address records.
-///
-/// Afterwards the domain has exactly the addresses `add ∪ (existing − remove)`.
-/// Removing an absent address and adding a present one are no-ops.
-///
-/// With `replace_only`, the number of records never changes: existing records
-/// are only re-pointed. Records with nothing to re-point to are kept, and
-/// addresses without a record to re-point are not added.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct Request {
-    /// Addresses that must exist afterwards.
-    pub add: Vec<IpAddr>,
-    /// Addresses that must not exist afterwards, unless also in `add`.
-    pub remove: Vec<IpAddr>,
-    /// Only re-point existing records, never add or delete any.
-    pub replace_only: bool,
+/// One provider operation of an update; records are identified by address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Operation {
+    /// Re-point a record at a new address (possibly changing A ↔ AAAA).
+    Replace { old: IpAddr, new: IpAddr },
+    /// Delete a record.
+    Delete(IpAddr),
+    /// Add a record.
+    Add(IpAddr),
 }
 
-/// The operations that carry out a [`Request`], on records identified by
-/// their position in the existing records.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct Plan {
-    /// Number of records left alone.
-    pub keep: usize,
-    /// Records to re-point at a new address (possibly changing A ↔ AAAA).
-    pub replace: Vec<(usize, IpAddr)>,
-    /// Records to delete.
-    pub delete: Vec<usize>,
-    /// Addresses to add records for.
-    pub add: Vec<IpAddr>,
-}
-
-impl Plan {
-    /// The summary of carrying out this plan.
-    pub fn summary(&self) -> UpdateSummary {
-        UpdateSummary {
-            kept: self.keep,
-            updated: self.replace.len(),
-            deleted: self.delete.len(),
-            created: self.add.len(),
+impl fmt::Display for Operation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Operation::Replace { old, new } => write!(f, "replace {old} with {new}"),
+            Operation::Delete(ip) => write!(f, "delete {ip}"),
+            Operation::Add(ip) => write!(f, "add {ip}"),
         }
-    }
-
-    /// The addresses after carrying out this plan on `existing`.
-    pub fn after(&self, existing: &[IpAddr]) -> Vec<IpAddr> {
-        let mut records: Vec<(usize, IpAddr)> = existing.iter().copied().enumerate().collect();
-        for (i, ip) in &self.replace {
-            records[*i].1 = *ip;
-        }
-        records.retain(|(i, _)| !self.delete.contains(i));
-        records
-            .into_iter()
-            .map(|(_, ip)| ip)
-            .chain(self.add.iter().copied())
-            .collect()
     }
 }
 
-/// Computes the operations that turn the `existing` records (one address per
-/// record) into the state described by `request`.
+/// The operations that turn the `existing` records (one address each) into
+/// exactly the `desired` addresses: replaces first, then deletes, then adds.
 ///
-/// Records that are no longer wanted are re-pointed at missing addresses
-/// where possible (same family first), which keeps provider-side record
-/// settings; the rest are deleted, and the remaining addresses are added.
-/// Duplicate records of a wanted address are treated as unwanted. With
-/// `replace_only`, nothing is deleted or added: the rest are kept and the
-/// remaining addresses dropped.
-pub(super) fn plan(existing: &[IpAddr], request: &Request) -> Plan {
-    let mut desired: Vec<IpAddr> = vec![];
-    for ip in &request.add {
-        if !desired.contains(ip) {
-            desired.push(*ip);
-        }
-    }
-    for ip in existing {
-        if !request.remove.contains(ip) && !desired.contains(ip) {
-            desired.push(*ip);
+/// One record per desired address is kept. Records that are no longer wanted
+/// (including duplicates) are re-pointed at missing addresses where possible,
+/// same family first, which keeps provider-side record settings; the rest are
+/// deleted, and the remaining addresses are added. With `replace_only`,
+/// nothing is deleted or added: the rest are kept and the remaining addresses
+/// dropped.
+pub(super) fn plan(existing: &[IpAddr], desired: &[IpAddr], replace_only: bool) -> Vec<Operation> {
+    let mut missing: Vec<IpAddr> = vec![];
+    for ip in desired {
+        if !missing.contains(ip) {
+            missing.push(*ip);
         }
     }
 
-    let mut missing = desired;
-    let mut keep = 0;
     let mut dropped = vec![];
-    for (i, ip) in existing.iter().enumerate() {
-        if let Some(pos) = missing.iter().position(|d| d == ip) {
-            missing.remove(pos);
-            keep += 1;
-        } else {
-            dropped.push((i, *ip));
+    for ip in existing {
+        match missing.iter().position(|m| m == ip) {
+            Some(pos) => {
+                missing.remove(pos);
+            }
+            None => dropped.push(*ip),
         }
     }
 
-    let mut replace = vec![];
+    let mut ops = vec![];
     let mut unpaired = vec![];
-    for (i, ip) in dropped {
-        match missing.iter().position(|m| m.is_ipv4() == ip.is_ipv4()) {
-            Some(pos) => replace.push((i, missing.remove(pos))),
-            None => unpaired.push(i),
+    for old in dropped {
+        match missing.iter().position(|m| m.is_ipv4() == old.is_ipv4()) {
+            Some(pos) => ops.push(Operation::Replace {
+                old,
+                new: missing.remove(pos),
+            }),
+            None => unpaired.push(old),
         }
     }
 
-    let mut delete = vec![];
-    for i in unpaired {
+    let mut deletes = vec![];
+    for old in unpaired {
         if !missing.is_empty() {
-            replace.push((i, missing.remove(0)));
-        } else if request.replace_only {
-            keep += 1;
-        } else {
-            delete.push(i);
+            ops.push(Operation::Replace {
+                old,
+                new: missing.remove(0),
+            });
+        } else if !replace_only {
+            deletes.push(Operation::Delete(old));
         }
     }
-    if request.replace_only {
-        missing.clear();
+    ops.extend(deletes);
+    if !replace_only {
+        ops.extend(missing.into_iter().map(Operation::Add));
     }
+    ops
+}
 
-    Plan {
-        keep,
-        replace,
-        delete,
-        add: missing,
+/// The addresses after carrying out `ops` on `existing`; each operation acts
+/// on the first record with its address.
+pub(super) fn apply(existing: &[IpAddr], ops: &[Operation]) -> Vec<IpAddr> {
+    let mut records = existing.to_vec();
+    for op in ops {
+        match *op {
+            Operation::Replace { old, new } => {
+                if let Some(record) = records.iter_mut().find(|r| **r == old) {
+                    *record = new;
+                }
+            }
+            Operation::Delete(ip) => {
+                if let Some(pos) = records.iter().position(|r| *r == ip) {
+                    records.remove(pos);
+                }
+            }
+            Operation::Add(ip) => records.push(ip),
+        }
+    }
+    records
+}
+
+/// What carrying out `ops` on `records` records changes.
+pub(super) fn summary(records: usize, ops: &[Operation]) -> UpdateSummary {
+    let count = |f: fn(&Operation) -> bool| ops.iter().filter(|op| f(op)).count();
+    let updated = count(|op| matches!(op, Operation::Replace { .. }));
+    let deleted = count(|op| matches!(op, Operation::Delete(_)));
+    UpdateSummary {
+        kept: records - updated - deleted,
+        updated,
+        deleted,
+        created: count(|op| matches!(op, Operation::Add(_))),
     }
 }
 
@@ -140,136 +130,132 @@ mod tests {
         list.iter().map(|s| ip(s)).collect()
     }
 
-    fn request(add: &[&str], remove: &[&str]) -> Request {
-        Request {
-            add: ips(add),
-            remove: ips(remove),
-            replace_only: false,
+    fn replace(old: &str, new: &str) -> Operation {
+        Operation::Replace {
+            old: ip(old),
+            new: ip(new),
         }
     }
 
-    fn replace_only(add: &[&str], remove: &[&str]) -> Request {
-        Request {
-            replace_only: true,
-            ..request(add, remove)
-        }
+    fn delete(s: &str) -> Operation {
+        Operation::Delete(ip(s))
+    }
+
+    fn add(s: &str) -> Operation {
+        Operation::Add(ip(s))
     }
 
     #[test]
-    fn empty() {
-        let plan = plan(&ips(&["1.1.1.1"]), &request(&[], &[]));
-        assert_eq!(
-            plan.summary(),
-            UpdateSummary {
-                kept: 1,
-                ..Default::default()
-            }
-        );
-    }
-
-    #[test]
-    fn add_present_and_remove_absent_are_noops() {
-        let plan = plan(&ips(&["1.1.1.1"]), &request(&["1.1.1.1"], &["9.9.9.9"]));
-        assert!(plan.summary().is_unchanged());
-        assert_eq!(plan.keep, 1);
+    fn unchanged() {
+        let existing = ips(&["1.1.1.1", "2001:db8::1"]);
+        assert!(plan(&existing, &ips(&["2001:db8::1", "1.1.1.1"]), false).is_empty());
     }
 
     #[test]
     fn adds_missing() {
-        let plan = plan(&[], &request(&["1.1.1.1", "2001:db8::1"], &[]));
-        assert_eq!(plan.add, ips(&["1.1.1.1", "2001:db8::1"]));
+        assert_eq!(
+            plan(&[], &ips(&["1.1.1.1", "2001:db8::1"]), false),
+            vec![add("1.1.1.1"), add("2001:db8::1")]
+        );
     }
 
     #[test]
     fn replaces_same_family_first() {
         let existing = ips(&["1.1.1.1", "2001:db8::1"]);
-        let plan = plan(
-            &existing,
-            &request(&["2001:db8::2", "2.2.2.2"], &["1.1.1.1", "2001:db8::1"]),
-        );
+        let ops = plan(&existing, &ips(&["2001:db8::2", "2.2.2.2"]), false);
         assert_eq!(
-            plan.replace,
-            vec![(0, ip("2.2.2.2")), (1, ip("2001:db8::2"))]
+            ops,
+            vec![
+                replace("1.1.1.1", "2.2.2.2"),
+                replace("2001:db8::1", "2001:db8::2")
+            ]
         );
-        assert!(plan.delete.is_empty() && plan.add.is_empty());
-        assert_eq!(plan.after(&existing), ips(&["2.2.2.2", "2001:db8::2"]));
+        assert_eq!(apply(&existing, &ops), ips(&["2.2.2.2", "2001:db8::2"]));
     }
 
     #[test]
     fn replaces_across_families() {
-        let plan = plan(&ips(&["1.1.1.1"]), &request(&["2001:db8::1"], &["1.1.1.1"]));
-        assert_eq!(plan.replace, vec![(0, ip("2001:db8::1"))]);
+        assert_eq!(
+            plan(&ips(&["1.1.1.1"]), &ips(&["2001:db8::1"]), false),
+            vec![replace("1.1.1.1", "2001:db8::1")]
+        );
     }
 
     #[test]
     fn deletes_and_adds_leftovers() {
         let existing = ips(&["1.1.1.1", "2.2.2.2"]);
-        let plan1 = plan(&existing, &request(&["3.3.3.3"], &["1.1.1.1", "2.2.2.2"]));
-        assert_eq!(plan1.replace, vec![(0, ip("3.3.3.3"))]);
-        assert_eq!(plan1.delete, vec![1]);
-        assert_eq!(plan1.after(&existing), ips(&["3.3.3.3"]));
+        let ops = plan(&existing, &ips(&["3.3.3.3"]), false);
+        assert_eq!(ops, vec![replace("1.1.1.1", "3.3.3.3"), delete("2.2.2.2")]);
+        assert_eq!(apply(&existing, &ops), ips(&["3.3.3.3"]));
 
         let existing = ips(&["1.1.1.1"]);
-        let plan2 = plan(&existing, &request(&["2.2.2.2", "3.3.3.3"], &["1.1.1.1"]));
-        assert_eq!(plan2.replace, vec![(0, ip("2.2.2.2"))]);
-        assert_eq!(plan2.add, ips(&["3.3.3.3"]));
-        assert_eq!(plan2.after(&existing), ips(&["2.2.2.2", "3.3.3.3"]));
+        let ops = plan(&existing, &ips(&["2.2.2.2", "3.3.3.3"]), false);
+        assert_eq!(ops, vec![replace("1.1.1.1", "2.2.2.2"), add("3.3.3.3")]);
+        assert_eq!(apply(&existing, &ops), ips(&["2.2.2.2", "3.3.3.3"]));
     }
 
     #[test]
-    fn removes_all() {
-        let plan = plan(
-            &ips(&["1.1.1.1", "2.2.2.2"]),
-            &request(&[], &["1.1.1.1", "2.2.2.2"]),
+    fn empty_desired_deletes_all() {
+        assert_eq!(
+            plan(&ips(&["1.1.1.1", "2.2.2.2"]), &[], false),
+            vec![delete("1.1.1.1"), delete("2.2.2.2")]
         );
-        assert_eq!(plan.delete, vec![0, 1]);
-    }
-
-    #[test]
-    fn add_wins_over_remove() {
-        let plan = plan(&ips(&["1.1.1.1"]), &request(&["1.1.1.1"], &["1.1.1.1"]));
-        assert_eq!(plan.keep, 1);
-        assert!(plan.summary().is_unchanged());
     }
 
     #[test]
     fn duplicates() {
         let existing = ips(&["1.1.1.1", "1.1.1.1"]);
-        let plan = plan(&existing, &request(&["1.1.1.1", "1.1.1.1"], &[]));
-        assert_eq!(plan.keep, 1);
-        assert_eq!(plan.delete, vec![1]);
-        assert_eq!(plan.after(&existing), ips(&["1.1.1.1"]));
+        let ops = plan(&existing, &ips(&["1.1.1.1", "1.1.1.1"]), false);
+        assert_eq!(ops, vec![delete("1.1.1.1")]);
+        assert_eq!(apply(&existing, &ops), ips(&["1.1.1.1"]));
     }
 
     #[test]
     fn replace_only_keeps_unpaired_records() {
-        let plan = plan(
-            &ips(&["1.1.1.1", "2.2.2.2"]),
-            &replace_only(&["3.3.3.3"], &["1.1.1.1", "2.2.2.2"]),
-        );
-        assert_eq!(plan.replace, vec![(0, ip("3.3.3.3"))]);
-        assert_eq!(plan.keep, 1);
-        assert!(plan.delete.is_empty() && plan.add.is_empty());
+        let existing = ips(&["1.1.1.1", "2.2.2.2"]);
+        let ops = plan(&existing, &ips(&["3.3.3.3"]), true);
+        assert_eq!(ops, vec![replace("1.1.1.1", "3.3.3.3")]);
+        assert_eq!(apply(&existing, &ops), ips(&["3.3.3.3", "2.2.2.2"]));
     }
 
     #[test]
     fn replace_only_drops_extra_addresses() {
-        let request = replace_only(&["2.2.2.2", "2001:db8::1"], &["1.1.1.1"]);
-        let plan1 = plan(&ips(&["1.1.1.1"]), &request);
-        assert_eq!(plan1.replace, vec![(0, ip("2.2.2.2"))]);
-        assert!(plan1.delete.is_empty() && plan1.add.is_empty());
-
+        let desired = ips(&["2.2.2.2", "2001:db8::1"]);
+        assert_eq!(
+            plan(&ips(&["1.1.1.1"]), &desired, true),
+            vec![replace("1.1.1.1", "2.2.2.2")]
+        );
         // nothing to re-point at all
-        assert!(plan(&[], &request).summary().is_unchanged());
+        assert!(plan(&[], &desired, true).is_empty());
     }
 
     #[test]
     fn replace_only_keeps_duplicates() {
-        let plan = plan(
-            &ips(&["1.1.1.1", "1.1.1.1"]),
-            &replace_only(&["1.1.1.1"], &[]),
+        assert!(plan(&ips(&["1.1.1.1", "1.1.1.1"]), &ips(&["1.1.1.1"]), true).is_empty());
+    }
+
+    #[test]
+    fn apply_acts_on_first_match() {
+        let existing = ips(&["1.1.1.1", "1.1.1.1"]);
+        let ops = [replace("1.1.1.1", "2.2.2.2"), delete("1.1.1.1")];
+        assert_eq!(apply(&existing, &ops), ips(&["2.2.2.2"]));
+    }
+
+    #[test]
+    fn summarizes() {
+        let ops = [
+            replace("1.1.1.1", "2.2.2.2"),
+            delete("3.3.3.3"),
+            add("4.4.4.4"),
+        ];
+        assert_eq!(
+            summary(4, &ops),
+            UpdateSummary {
+                kept: 2,
+                updated: 1,
+                deleted: 1,
+                created: 1,
+            }
         );
-        assert_eq!(plan.keep, 2);
-        assert!(plan.summary().is_unchanged());
     }
 }
