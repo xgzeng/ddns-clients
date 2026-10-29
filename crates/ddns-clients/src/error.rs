@@ -1,4 +1,7 @@
-use std::{net::AddrParseError, time::Duration};
+use std::{
+    net::{AddrParseError, IpAddr},
+    time::Duration,
+};
 
 /// Errors returned by this crate.
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +49,11 @@ pub enum Error {
     /// The provider cannot make the requested change.
     #[error("unsupported update: {0}")]
     Unsupported(String),
+
+    /// The domain has no record with the address, e.g. because it was
+    /// changed elsewhere since it was listed.
+    #[error("{domain} has no record for {ip}")]
+    RecordNotFound { domain: String, ip: IpAddr },
 
     /// A [`DynDnsClient`](crate::DynDnsClient) was configured incorrectly,
     /// e.g. with an unknown provider or a missing parameter.

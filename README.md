@@ -75,8 +75,13 @@ client.update(ips).await?; // replaces the domain's A/AAAA records
 ## Daemon
 
 ```sh
-ddnsd -c /etc/ddnsd.toml     # the default path
+ddnsd -c /etc/ddnsd.toml           # the default path
+sudo ddnsd dry-run                 # show what each provider's records would become
 ```
+
+`dry-run` resolves the public IPs once and, for each provider, prints the
+current records and the changes an update would make, without making them. It
+only reads from the providers, and exits with an error if any of them failed.
 
 The config file is TOML and must not be readable by group/others
 (`chmod 600`). Each `[provider.<name>]` table is one domain on one provider;
@@ -87,6 +92,9 @@ defaults that each provider can override.
 
 ```toml
 interval = 300                 # seconds between checks, default 300
+refresh_interval = 3600        # seconds after which records are read again from the
+                               # provider, warning about changes made elsewhere; 0 = never;
+                               # default 3600
 resolvers = [                  # tried in order per family; default: icanhazip, local
   { type = "icanhazip" },
   { type = "ipify" },

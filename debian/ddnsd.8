@@ -5,6 +5,10 @@ ddnsd \- dynamic DNS daemon
 .B ddnsd
 .RB [ \-c
 .IR config ]
+.br
+.B ddnsd dry\-run
+.RB [ \-c
+.IR config ]
 .SH DESCRIPTION
 .B ddnsd
 periodically finds this host's public IPv4 and IPv6 addresses and keeps the
@@ -19,6 +23,12 @@ When a provider rejects an update in a way that needs the configuration to be
 fixed, such as invalid credentials, the daemon stops updating that provider,
 and exits once all providers have been rejected. After server errors it waits
 as long as the provider asks before updating that provider again.
+.SH COMMANDS
+.TP
+.B dry\-run
+Resolve the public addresses once and, for each provider, print the current
+records and the changes an update would make, without making them. Only reads
+from the providers. Exits with a non-zero status if any provider failed.
 .SH OPTIONS
 .TP
 .BR \-c ", " \-\-config " " \fIconfig\fR

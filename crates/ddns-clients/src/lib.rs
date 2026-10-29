@@ -35,9 +35,11 @@ mod error;
 pub mod providers;
 pub mod resolve;
 
-pub use client::{DynDnsClient, DynDnsClientBuilder};
+pub use client::{
+    DynDnsClient, DynDnsClientBuilder, UpdatePreview, UpdateRequestBuilder, UpdateSummary,
+};
 pub use error::{Error, Result};
+pub use providers::DynDnsProvider;
 pub use providers::cloudflare::CloudflareProvider;
 pub use providers::noip::NoIpProvider;
-pub use providers::{DynDnsProvider, RecordUpdateRequest, UpdateRequestBuilder, UpdateSummary};
 pub use resolve::IpResolver;

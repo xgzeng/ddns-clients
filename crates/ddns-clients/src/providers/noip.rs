@@ -3,14 +3,11 @@
 
 mod dns;
 
-use std::{collections::HashMap, fmt, net::IpAddr, time::Duration};
+use std::{fmt, net::IpAddr, time::Duration};
 
 use async_trait::async_trait;
 
-use super::{
-    ChangePlan, DynDnsProvider, RecordUpdateRequest, UpdateRequestBuilder, UpdateSummary,
-    plan_changes,
-};
+use super::DynDnsProvider;
 use crate::{Error, Result};
 
 const UPDATE_URL: &str = "https://dynupdate.no-ip.com/nic/update";
@@ -23,14 +20,15 @@ const DEFAULT_USER_AGENT: &str = concat!("ddns-clients ddns-clients/", env!("CAR
 /// Updates No-IP hostnames with an account's username and password (or a
 /// DDNS key).
 ///
-/// - A hostname has at most one A and one AAAA record, and records cannot be
-///   removed, only re-pointed; other updates fail with
-///   [`Error::Unsupported`].
-/// - The update API cannot read records, so [`list`](DynDnsProvider::list)
-///   returns the addresses set by this provider's last successful update,
-///   or else asks No-IP's nameservers (`nf1`–`nf5.no-ip.com`) over TCP. If
-///   none of them answers, e.g. for a domain they don't serve, it falls back
-///   to the system resolver, whose answer may be cached or overridden.
+/// - A hostname has at most one A and one AAAA record. Records cannot be
+///   deleted, and re-pointing cannot change their type (A ↔ AAAA); such
+///   operations fail with [`Error::Unsupported`].
+/// - The update API cannot read records, so the addresses are read from
+///   No-IP's nameservers (`nf1`–`nf5.no-ip.com`) over TCP. If none of them
+///   answers, e.g. for a domain they don't serve, they are read through the
+///   system resolver, whose answer may be cached or overridden. They are
+///   cached, together with the addresses set by updates, until
+///   [`refresh`](DynDnsProvider::refresh) or a failed update.
 /// - The TTL of an update is ignored.
 /// - Errors that need user intervention (bad credentials, unknown hostname,
 ///   blocked client) are [`Error::Rejected`], and No-IP requires clients to
@@ -40,7 +38,9 @@ pub struct NoIpProvider {
     client: reqwest::Client,
     username: String,
     password: String,
-    known: HashMap<String, Vec<IpAddr>>, // addresses set by the last update, per hostname
+    hostname: String,
+    /// The hostname's addresses, as last read or set; `None` when unknown.
+    known: Option<Vec<IpAddr>>,
 }
 
 /// An error response from the No-IP update API.
@@ -123,41 +123,57 @@ fn parse_response(status: u16, body: &str, sent: &[IpAddr]) -> Result<()> {
     Err(Error::rejected(err))
 }
 
-/// The addresses after carrying out `plan` on `existing`, IPv4 first.
-///
-/// Fails if they need more than one address per family, or the removal of
-/// a family's last address.
-fn planned_addresses(existing: &[IpAddr], plan: &ChangePlan<IpAddr>) -> Result<Vec<IpAddr>> {
-    let changed =
-        |ip: &IpAddr| plan.delete.contains(ip) || plan.repoint.iter().any(|(id, _)| id == ip);
-    let mut ips: Vec<IpAddr> = existing.iter().copied().filter(|ip| !changed(ip)).collect();
-    ips.extend(plan.repoint.iter().map(|(_, ip)| *ip));
-    ips.extend(&plan.create);
-    ips.sort_by_key(|ip| ip.is_ipv6());
+/// Name of `ip`'s record type.
+fn record_type(ip: &IpAddr) -> &'static str {
+    if ip.is_ipv4() { "A" } else { "AAAA" }
+}
 
-    for (name, is_family) in [
-        ("A", IpAddr::is_ipv4 as fn(&IpAddr) -> bool),
-        ("AAAA", IpAddr::is_ipv6),
-    ] {
-        let count = ips.iter().filter(|ip| is_family(ip)).count();
-        if count > 1 {
-            return Err(Error::Unsupported(format!(
-                "No-IP hostnames have at most one {name} record"
-            )));
-        }
-        if count == 0 && existing.iter().any(is_family) {
-            return Err(Error::Unsupported(format!(
-                "No-IP cannot remove the {name} record of a hostname"
-            )));
-        }
+/// `current` with `ip` added, IPv4 first; a hostname has at most one record
+/// per family.
+fn added(current: &[IpAddr], ip: IpAddr) -> Result<Vec<IpAddr>> {
+    if current.iter().any(|c| c.is_ipv4() == ip.is_ipv4()) {
+        return Err(Error::Unsupported(format!(
+            "No-IP hostnames have at most one {} record",
+            record_type(&ip)
+        )));
     }
+    let mut ips = current.to_vec();
+    ips.push(ip);
+    ips.sort_by_key(IpAddr::is_ipv6);
     Ok(ips)
 }
 
+/// `current` with `old` re-pointed to `new`; No-IP cannot change a record's
+/// type.
+fn replaced(domain: &str, current: &[IpAddr], old: IpAddr, new: IpAddr) -> Result<Vec<IpAddr>> {
+    if !current.contains(&old) {
+        return Err(Error::RecordNotFound {
+            domain: domain.to_string(),
+            ip: old,
+        });
+    }
+    if old.is_ipv4() != new.is_ipv4() {
+        return Err(Error::Unsupported(format!(
+            "No-IP cannot change an {} record to {}",
+            record_type(&old),
+            record_type(&new)
+        )));
+    }
+    Ok(current
+        .iter()
+        .map(|ip| if *ip == old { new } else { *ip })
+        .collect())
+}
+
 impl NoIpProvider {
-    /// Creates a provider authenticating with `username` and `password`.
-    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Result<Self> {
-        Self::with_user_agent(username, password, DEFAULT_USER_AGENT)
+    /// Creates a provider for `hostname`, authenticating with `username` and
+    /// `password`.
+    pub fn new(
+        username: impl Into<String>,
+        password: impl Into<String>,
+        hostname: impl Into<String>,
+    ) -> Result<Self> {
+        Self::with_user_agent(username, password, hostname, DEFAULT_USER_AGENT)
     }
 
     /// Like [`new`](Self::new), but identifies as `user_agent`.
@@ -167,6 +183,7 @@ impl NoIpProvider {
     pub fn with_user_agent(
         username: impl Into<String>,
         password: impl Into<String>,
+        hostname: impl Into<String>,
         user_agent: &str,
     ) -> Result<Self> {
         let client = reqwest::Client::builder().user_agent(user_agent).build()?;
@@ -174,49 +191,43 @@ impl NoIpProvider {
             client,
             username: username.into(),
             password: password.into(),
-            known: HashMap::new(),
+            hostname: hostname.into(),
+            known: None,
         })
     }
 
-    async fn addresses(&self, domain: &str) -> Result<Vec<IpAddr>> {
-        if let Some(ips) = self.known.get(domain) {
+    /// The hostname's addresses, from the cache or else looked up.
+    async fn addresses(&mut self) -> Result<Vec<IpAddr>> {
+        if let Some(ips) = &self.known {
             return Ok(ips.clone());
         }
-        match dns::lookup(domain).await {
+        let ips = self.lookup().await?;
+        log::debug!("{}: addresses {ips:?}", self.hostname);
+        self.known = Some(ips.clone());
+        Ok(ips)
+    }
+
+    /// The hostname's addresses from No-IP's nameservers, or else the system
+    /// resolver.
+    async fn lookup(&self) -> Result<Vec<IpAddr>> {
+        let hostname = &self.hostname;
+        match dns::lookup(hostname).await {
             Ok(ips) => return Ok(ips),
             Err(err) => log::warn!(
-                "{domain}: no answer from No-IP's nameservers ({err}), using the system resolver"
+                "{hostname}: no answer from No-IP's nameservers ({err}), using the system resolver"
             ),
         }
         let mut ips = vec![];
-        for addr in tokio::net::lookup_host((domain, 0)).await? {
+        for addr in tokio::net::lookup_host((hostname.as_str(), 0)).await? {
             if !ips.contains(&addr.ip()) {
                 ips.push(addr.ip());
             }
         }
         Ok(ips)
     }
-}
 
-#[async_trait]
-impl DynDnsProvider for NoIpProvider {
-    async fn list(&mut self, domain: &str) -> Result<Vec<IpAddr>> {
-        self.addresses(domain).await
-    }
-
-    fn update_request<'a>(&'a mut self, domain: &str) -> UpdateRequestBuilder<'a> {
-        UpdateRequestBuilder::new(self, domain)
-    }
-
-    async fn execute_request(&mut self, request: RecordUpdateRequest) -> Result<UpdateSummary> {
-        let existing = self.addresses(&request.domain).await?;
-        let records: Vec<(IpAddr, IpAddr)> = existing.iter().map(|ip| (*ip, *ip)).collect();
-        let plan = plan_changes(&records, &request);
-        // No-IP may block clients that send updates without changes
-        if plan.summary().is_unchanged() {
-            return Ok(plan.summary());
-        }
-        let ips = planned_addresses(&existing, &plan)?;
+    /// Sets the hostname's addresses to `ips`, at most one per family.
+    async fn set(&mut self, ips: Vec<IpAddr>) -> Result<()> {
         let myip = ips
             .iter()
             .map(IpAddr::to_string)
@@ -224,21 +235,65 @@ impl DynDnsProvider for NoIpProvider {
             .join(",");
 
         // forget the cached addresses until the update is known to succeed
-        self.known.remove(&request.domain);
+        self.known = None;
         let response = self
             .client
             .get(UPDATE_URL)
             .basic_auth(&self.username, Some(&self.password))
-            .query(&[("hostname", request.domain.as_str()), ("myip", &myip)])
+            .query(&[("hostname", self.hostname.as_str()), ("myip", &myip)])
             .send()
             .await?;
         let status = response.status().as_u16();
         let body = response.text().await?;
         parse_response(status, &body, &ips)?;
-        log::debug!("{}: set addresses to {myip}", request.domain);
+        log::debug!("{}: set addresses to {myip}", self.hostname);
 
-        self.known.insert(request.domain, ips);
-        Ok(plan.summary())
+        self.known = Some(ips);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DynDnsProvider for NoIpProvider {
+    fn domain(&self) -> &str {
+        &self.hostname
+    }
+
+    async fn list(&mut self) -> Result<Vec<IpAddr>> {
+        self.addresses().await
+    }
+
+    async fn refresh(&mut self) -> Result<()> {
+        self.known = None;
+        self.addresses().await.map(drop)
+    }
+
+    /// Sets the hostname's address of `ip`'s family; fails if it already
+    /// has one.
+    async fn add(&mut self, ip: IpAddr, _ttl: Option<u32>) -> Result<()> {
+        let current = self.addresses().await?;
+        let ips = added(&current, ip)?;
+        self.set(ips).await
+    }
+
+    /// Changes the hostname's address `old` to `new` of the same family.
+    async fn replace(&mut self, old: IpAddr, new: IpAddr, _ttl: Option<u32>) -> Result<()> {
+        let current = self.addresses().await?;
+        let ips = replaced(&self.hostname, &current, old, new)?;
+        // No-IP may block clients that send updates without changes
+        if ips == current {
+            return Ok(());
+        }
+        self.set(ips).await
+    }
+
+    /// Always fails: No-IP records cannot be removed.
+    async fn delete(&mut self, ip: IpAddr) -> Result<()> {
+        Err(Error::Unsupported(format!(
+            "No-IP cannot remove the {} record of {}",
+            record_type(&ip),
+            self.hostname
+        )))
     }
 }
 
@@ -252,17 +307,6 @@ mod tests {
 
     fn ips(list: &[&str]) -> Vec<IpAddr> {
         list.iter().map(|s| ip(s)).collect()
-    }
-
-    fn planned(existing: &[&str], add: &[&str], remove: &[&str]) -> Result<Vec<IpAddr>> {
-        let existing = ips(existing);
-        let records: Vec<_> = existing.iter().map(|ip| (*ip, *ip)).collect();
-        let request = RecordUpdateRequest {
-            add: ips(add),
-            remove: ips(remove),
-            ..Default::default()
-        };
-        planned_addresses(&existing, &plan_changes(&records, &request))
     }
 
     fn inner(err: &Error) -> &NoIpError {
@@ -338,41 +382,45 @@ mod tests {
     }
 
     #[test]
-    fn planned_replaces_and_adds() {
+    fn adds_missing_family() {
         assert_eq!(
-            planned(
-                &["192.0.2.1"],
-                &["192.0.2.2", "2001:db8::1"],
-                &["192.0.2.1"]
-            )
-            .unwrap(),
-            ips(&["192.0.2.2", "2001:db8::1"])
-        );
-        // untouched families are sent unchanged
-        assert_eq!(
-            planned(
-                &["2001:db8::1", "192.0.2.1"],
-                &["192.0.2.2"],
-                &["192.0.2.1"]
-            )
-            .unwrap(),
-            ips(&["192.0.2.2", "2001:db8::1"])
+            added(&ips(&["2001:db8::1"]), ip("192.0.2.1")).unwrap(),
+            ips(&["192.0.2.1", "2001:db8::1"])
         );
         assert_eq!(
-            planned(&[], &["2001:db8::1"], &[]).unwrap(),
+            added(&[], ip("2001:db8::1")).unwrap(),
             ips(&["2001:db8::1"])
         );
     }
 
     #[test]
-    fn planned_rejects_two_per_family() {
-        let err = planned(&[], &["192.0.2.1", "192.0.2.2"], &[]).unwrap_err();
+    fn add_rejects_second_per_family() {
+        let err = added(&ips(&["192.0.2.1"]), ip("192.0.2.2")).unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)), "{err:?}");
+        assert!(err.to_string().contains("one A record"), "{err}");
     }
 
     #[test]
-    fn planned_rejects_removal() {
-        let err = planned(&["192.0.2.1", "2001:db8::1"], &[], &["2001:db8::1"]).unwrap_err();
-        assert!(err.to_string().contains("AAAA"), "{err}");
+    fn replaces_within_family() {
+        // the other family is sent unchanged
+        assert_eq!(
+            replaced(
+                "h.ddns.net",
+                &ips(&["192.0.2.1", "2001:db8::1"]),
+                ip("192.0.2.1"),
+                ip("192.0.2.2")
+            )
+            .unwrap(),
+            ips(&["192.0.2.2", "2001:db8::1"])
+        );
+    }
+
+    #[test]
+    fn replace_rejects_missing_and_type_change() {
+        let current = ips(&["192.0.2.1"]);
+        let err = replaced("h.ddns.net", &current, ip("192.0.2.9"), ip("192.0.2.2")).unwrap_err();
+        assert!(matches!(err, Error::RecordNotFound { .. }), "{err:?}");
+        let err = replaced("h.ddns.net", &current, ip("192.0.2.1"), ip("2001:db8::1")).unwrap_err();
+        assert!(err.to_string().contains("A record to AAAA"), "{err}");
     }
 }

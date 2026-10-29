@@ -4,7 +4,7 @@
 
 | Path | |
 |---|---|
-| `crates/ddns-clients` | Library: `IpResolver` trait and resolvers (`resolve/`), `DynDnsProvider` trait, providers and `plan_changes` (`providers/`), `DynDnsClient` with its record cache and address-family restriction, and its builder (`client.rs`) |
+| `crates/ddns-clients` | Library: `IpResolver` trait and resolvers (`resolve/`); `DynDnsProvider` trait with the primitive record operations on one domain, and the providers with their record caches (`providers/`); `DynDnsClient`, which plans the operations (`client/plan.rs`) and adds the address-family restriction and `replace_only`, and its builder (`client.rs`) |
 | `crates/ddnsd` | Daemon: TOML config (`config.rs`), the `Updater` that keeps a domain at the resolved IPs within `max_records` (`updater.rs`), and the per-provider update loop (`main.rs`) |
 | `debian/` | Debian packaging of `ddnsd` |
 | `scripts/` | Helper scripts, e.g. `build-deb.sh` |
@@ -57,9 +57,15 @@ may block the client's IP.
 
 ## Adding a built-in provider
 
-1. Implement `DynDnsProvider` in `crates/ddns-clients/src/providers/<name>.rs`,
-   using `plan_changes` to turn a `RecordUpdateRequest` into record operations.
-   Return `Error::Rejected` for errors that need a configuration fix and
+1. Implement `DynDnsProvider` in `crates/ddns-clients/src/providers/<name>.rs`
+   for one domain, given to its constructor: `domain`, `list`, `add`,
+   `replace` and `delete`, each a direct call of the service's API;
+   `DynDnsClient` decides which to run. The provider may cache records (and
+   ids); it then implements `refresh`, keeps the cache in step with its own
+   operations and drops it when one fails. Return `Error::RecordNotFound`
+   when `replace` or `delete` finds no record with the address,
+   `Error::Unsupported` for operations the service can't do,
+   `Error::Rejected` for errors that need a configuration fix and
    `Error::Unavailable` when the service asks clients to back off.
 2. Add its name constant to `providers/mod.rs` and re-export the type in
    `lib.rs`.

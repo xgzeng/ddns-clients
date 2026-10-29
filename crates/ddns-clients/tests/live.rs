@@ -17,8 +17,6 @@
 
 use std::net::IpAddr;
 
-use ddns_clients::UpdateSummary;
-
 /// Reads the variables `names`; panics listing the missing ones.
 fn required_env<const N: usize>(names: [&str; N]) -> [String; N] {
     let values = names.map(|name| std::env::var(name).ok());
@@ -36,15 +34,6 @@ fn ip(s: &str) -> IpAddr {
     s.parse().unwrap()
 }
 
-fn summary(kept: usize, updated: usize, deleted: usize, created: usize) -> UpdateSummary {
-    UpdateSummary {
-        kept,
-        updated,
-        deleted,
-        created,
-    }
-}
-
 mod cloudflare {
     use std::{
         net::IpAddr,
@@ -52,11 +41,10 @@ mod cloudflare {
     };
 
     use ddns_clients::{
-        CloudflareProvider, DynDnsProvider, Error, UpdateSummary,
-        providers::cloudflare::CloudflareError,
+        CloudflareProvider, DynDnsProvider, Error, providers::cloudflare::CloudflareError,
     };
 
-    use super::{ip, required_env, summary};
+    use super::{ip, required_env};
 
     struct LiveEnv {
         api_token: String,
@@ -77,32 +65,29 @@ mod cloudflare {
         }
     }
 
+    /// The cached and the actual addresses, each sorted; they should match.
     async fn sorted_ips(
         provider: &mut CloudflareProvider,
-        domain: &str,
-    ) -> Result<Vec<IpAddr>, Error> {
-        let mut ips = provider.list(domain).await?;
-        ips.sort();
-        Ok(ips)
+    ) -> Result<(Vec<IpAddr>, Vec<IpAddr>), Error> {
+        let mut cached = provider.list().await?;
+        cached.sort();
+        provider.refresh().await?;
+        let mut actual = provider.list().await?;
+        actual.sort();
+        Ok((cached, actual))
     }
 
-    async fn remove_all_records(
-        provider: &mut CloudflareProvider,
-        domain: &str,
-    ) -> Result<UpdateSummary, Error> {
-        let existing = provider.list(domain).await?;
-        provider
-            .update_request(domain)
-            .remove_all(existing)
-            .send()
-            .await
+    async fn delete_all_records(provider: &mut CloudflareProvider) -> Result<(), Error> {
+        provider.refresh().await?;
+        for ip in provider.list().await? {
+            provider.delete(ip).await?;
+        }
+        Ok(())
     }
 
-    async fn exercise_records(
-        provider: &mut CloudflareProvider,
-        domain: &str,
-    ) -> Result<(), Error> {
-        let records = provider.list(domain).await?;
+    async fn exercise_records(provider: &mut CloudflareProvider) -> Result<(), Error> {
+        let domain = provider.domain().to_string();
+        let records = provider.list().await?;
         assert!(
             records.is_empty(),
             "{domain} already has records: {records:?}"
@@ -111,47 +96,27 @@ mod cloudflare {
         let (a1, a2, a3) = (ip("192.0.2.1"), ip("198.51.100.1"), ip("203.0.113.1"));
         let aaaa1 = ip("2001:db8::1");
 
-        let result = provider
-            .update_request(domain)
-            .add(a1)
-            .add(aaaa1)
-            .ttl(Some(120))
-            .send()
-            .await?;
-        assert_eq!(result, summary(0, 0, 0, 2));
-        assert_eq!(sorted_ips(provider, domain).await?, vec![a1, aaaa1]);
+        provider.add(a1, Some(120)).await?;
+        provider.add(aaaa1, Some(120)).await?;
+        let expected = vec![a1, aaaa1];
+        assert_eq!(sorted_ips(provider).await?, (expected.clone(), expected));
 
-        // replacing an address re-points the existing record
-        let result = provider
-            .update_request(domain)
-            .remove(a1)
-            .add(a2)
-            .send()
-            .await?;
-        assert_eq!(result, summary(1, 1, 0, 0));
-        assert_eq!(sorted_ips(provider, domain).await?, vec![a2, aaaa1]);
+        provider.replace(a1, a2, None).await?;
+        let expected = vec![a2, aaaa1];
+        assert_eq!(sorted_ips(provider).await?, (expected.clone(), expected));
 
         // AAAA -> A on the same record
-        let result = provider
-            .update_request(domain)
-            .remove(aaaa1)
-            .add(a3)
-            .send()
-            .await?;
-        assert_eq!(result, summary(1, 1, 0, 0));
-        assert_eq!(sorted_ips(provider, domain).await?, vec![a2, a3]);
+        provider.replace(aaaa1, a3, None).await?;
+        let expected = vec![a2, a3];
+        assert_eq!(sorted_ips(provider).await?, (expected.clone(), expected));
 
-        // adding a present address changes nothing
-        let result = provider.update_request(domain).add(a2).send().await?;
-        assert_eq!(result, summary(2, 0, 0, 0));
+        // the AAAA record is gone
+        let err = provider.delete(aaaa1).await.unwrap_err();
+        assert!(matches!(err, Error::RecordNotFound { .. }), "{err:?}");
 
-        let result = remove_all_records(provider, domain).await?;
-        assert_eq!(result, summary(0, 0, 2, 0));
-        let records = provider.list(domain).await?;
-        assert!(
-            records.is_empty(),
-            "records left after removal: {records:?}"
-        );
+        provider.delete(a2).await?;
+        provider.delete(a3).await?;
+        assert_eq!(sorted_ips(provider).await?, (vec![], vec![]));
         Ok(())
     }
 
@@ -160,14 +125,18 @@ mod cloudflare {
     async fn record_lifecycle() {
         let env = live_env();
         eprintln!("using cloudflare test domain {}", env.domain);
-        let new_provider =
-            || CloudflareProvider::new(env.api_token.as_str(), env.zone.as_str()).unwrap();
+        let new_provider = || {
+            CloudflareProvider::new(
+                env.api_token.as_str(),
+                env.zone.as_str(),
+                env.domain.as_str(),
+            )
+            .unwrap()
+        };
 
         // run in a task so a failed assertion still reaches the cleanup below
         let mut provider = new_provider();
-        let domain = env.domain.clone();
-        let result =
-            tokio::spawn(async move { exercise_records(&mut provider, &domain).await }).await;
+        let result = tokio::spawn(async move { exercise_records(&mut provider).await }).await;
 
         match result {
             Ok(Ok(())) => return,
@@ -177,7 +146,7 @@ mod cloudflare {
 
         // best-effort cleanup
         let mut provider = new_provider();
-        if let Err(err) = remove_all_records(&mut provider, &env.domain).await {
+        if let Err(err) = delete_all_records(&mut provider).await {
             eprintln!("cleanup of {} failed: {err:?}", env.domain);
         }
         panic!("cloudflare record lifecycle test failed, see output above");
@@ -186,8 +155,10 @@ mod cloudflare {
     #[tokio::test]
     #[ignore = "needs network"]
     async fn bad_token_is_reported() {
-        let mut provider = CloudflareProvider::new("not-a-valid-token", "example.com").unwrap();
-        let err = provider.list("ddns.example.com").await.unwrap_err();
+        let mut provider =
+            CloudflareProvider::new("not-a-valid-token", "example.com", "ddns.example.com")
+                .unwrap();
+        let err = provider.list().await.unwrap_err();
         let Error::Provider(err) = err else {
             panic!("unexpected error {err:?}");
         };
@@ -204,7 +175,7 @@ mod noip {
 
     use ddns_clients::{DynDnsProvider, NoIpProvider};
 
-    use super::{ip, required_env, summary};
+    use super::{ip, required_env};
 
     struct LiveEnv {
         username: String,
@@ -229,9 +200,9 @@ mod noip {
     #[ignore = "needs DDNS_NOIP_* variables"]
     async fn repoint_and_restore() {
         let env = live_env();
-        let mut provider = NoIpProvider::new(env.username, env.password).unwrap();
+        let mut provider = NoIpProvider::new(env.username, env.password, &env.hostname).unwrap();
 
-        let mut original = provider.list(&env.hostname).await.unwrap();
+        let mut original = provider.list().await.unwrap();
         eprintln!("{} has {original:?}", env.hostname);
         let original_v4: Vec<IpAddr> = original.iter().copied().filter(IpAddr::is_ipv4).collect();
         assert_eq!(
@@ -246,28 +217,19 @@ mod noip {
         } else {
             ip("192.0.2.10")
         };
-        let changed = summary(original.len() - 1, 1, 0, 0);
 
-        let result = provider
-            .update_request(&env.hostname)
-            .remove_all(original_v4.clone())
-            .add(test_ip)
-            .send()
+        provider
+            .replace(original_v4[0], test_ip, None)
             .await
             .unwrap();
-        assert_eq!(result, changed);
-        let current = provider.list(&env.hostname).await.unwrap();
+        let current = provider.list().await.unwrap();
         assert!(current.contains(&test_ip), "{current:?}");
 
-        let result = provider
-            .update_request(&env.hostname)
-            .remove(test_ip)
-            .add_all(original_v4)
-            .send()
+        provider
+            .replace(test_ip, original_v4[0], None)
             .await
             .unwrap();
-        assert_eq!(result, changed);
-        let mut restored = provider.list(&env.hostname).await.unwrap();
+        let mut restored = provider.list().await.unwrap();
         restored.sort();
         original.sort();
         assert_eq!(restored, original);

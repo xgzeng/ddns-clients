@@ -7,21 +7,26 @@ use async_trait::async_trait;
 use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::{
-    DynDnsProvider, RecordUpdateRequest, UpdateRequestBuilder, UpdateSummary, plan_changes,
-};
+use super::DynDnsProvider;
 use crate::{Error, Result};
 
 const BASE_URL: &str = "https://api.cloudflare.com/client/v4";
 
-/// Manages records of a single Cloudflare zone using an API token.
+/// Manages the A/AAAA records of one domain in a Cloudflare zone, using an
+/// API token.
 ///
-/// The token needs the `Zone:Read` and `DNS:Edit` permissions.
+/// The token needs the `Zone:Read` and `DNS:Edit` permissions. The records'
+/// ids are cached after the first [`list`](DynDnsProvider::list), so
+/// re-pointing and deleting a record takes one request; a cache that no
+/// longer matches the zone is read again.
 pub struct CloudflareProvider {
     client: reqwest::Client,
     api_token: String,
     zone_name: String,
     zone_id: Option<String>, // zone id cache
+    domain: String,
+    /// Ids and addresses of the domain's A/AAAA records, if known.
+    records: Option<Vec<(String, IpAddr)>>,
 }
 
 /// An error response from the Cloudflare API.
@@ -126,11 +131,39 @@ fn address_record(record: DnsRecord) -> Option<(String, IpAddr)> {
     Some((record.id, ip))
 }
 
+/// The id of a record with `ip`; compares parsed addresses, so IPv6
+/// formatting doesn't matter.
+fn find_id(records: &[(String, IpAddr)], ip: IpAddr) -> Option<String> {
+    records
+        .iter()
+        .find(|(_, record_ip)| *record_ip == ip)
+        .map(|(id, _)| id.clone())
+}
+
+/// Records record `id`'s new address in the cache, if any.
+fn replace_cached(records: &mut Option<Vec<(String, IpAddr)>>, id: &str, ip: IpAddr) {
+    if let Some(record) = records.iter_mut().flatten().find(|(i, _)| i == id) {
+        record.1 = ip;
+    }
+}
+
+/// Removes record `id` from the cache, if any.
+fn delete_cached(records: &mut Option<Vec<(String, IpAddr)>>, id: &str) {
+    if let Some(records) = records {
+        records.retain(|(i, _)| i != id);
+    }
+}
+
 impl CloudflareProvider {
-    /// Creates a provider for `zone_name`, authenticating with `api_token`.
+    /// Creates a provider for `domain` in `zone_name`, authenticating with
+    /// `api_token`.
     ///
-    /// The zone id is looked up lazily on the first request.
-    pub fn new(api_token: impl Into<String>, zone_name: impl Into<String>) -> Result<Self> {
+    /// The zone id and the records are looked up lazily on the first request.
+    pub fn new(
+        api_token: impl Into<String>,
+        zone_name: impl Into<String>,
+        domain: impl Into<String>,
+    ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(concat!("ddns-clients/", env!("CARGO_PKG_VERSION")))
             .build()?;
@@ -139,6 +172,8 @@ impl CloudflareProvider {
             api_token: api_token.into(),
             zone_name: zone_name.into(),
             zone_id: None,
+            domain: domain.into(),
+            records: None,
         })
     }
 
@@ -166,60 +201,114 @@ impl CloudflareProvider {
         Ok(zone.id)
     }
 
-    /// Ids and addresses of all A/AAAA records of `domain`.
-    async fn address_records(&mut self, domain: &str) -> Result<Vec<(String, IpAddr)>> {
+    async fn records_url(&mut self) -> Result<String> {
         let zone_id = self.zone_id().await?;
+        Ok(format!("{BASE_URL}/zones/{zone_id}/dns_records"))
+    }
+
+    /// Reads the ids and addresses of the domain's A/AAAA records into the
+    /// cache.
+    async fn fetch(&mut self) -> Result<Vec<(String, IpAddr)>> {
+        self.records = None;
+        let url = self.records_url().await?;
         let request = self
             .client
-            .get(format!("{BASE_URL}/zones/{zone_id}/dns_records"))
-            .query(&[("name", domain), ("per_page", "100")]);
+            .get(url)
+            .query(&[("name", self.domain.as_str()), ("per_page", "100")]);
         let records: Vec<DnsRecord> = self.call(request).await?;
-        Ok(records.into_iter().filter_map(address_record).collect())
+        let records: Vec<(String, IpAddr)> =
+            records.into_iter().filter_map(address_record).collect();
+        log::debug!("{}: records {records:?}", self.domain);
+        self.records = Some(records.clone());
+        Ok(records)
+    }
+
+    /// The id of a record with `ip`; reads the records again if the cached
+    /// ones have none.
+    async fn record_id(&mut self, ip: IpAddr) -> Result<String> {
+        if let Some(id) = self.records.as_deref().and_then(|r| find_id(r, ip)) {
+            return Ok(id);
+        }
+        if self.records.is_some() {
+            log::warn!(
+                "{}: no cached record for {ip}, records changed outside this client",
+                self.domain
+            );
+        }
+        let records = self.fetch().await?;
+        find_id(&records, ip).ok_or_else(|| Error::RecordNotFound {
+            domain: self.domain.clone(),
+            ip,
+        })
     }
 }
 
 #[async_trait]
 impl DynDnsProvider for CloudflareProvider {
-    async fn list(&mut self, domain: &str) -> Result<Vec<IpAddr>> {
-        let records = self.address_records(domain).await?;
+    fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    async fn list(&mut self) -> Result<Vec<IpAddr>> {
+        let records = match &self.records {
+            Some(records) => records.clone(),
+            None => self.fetch().await?,
+        };
         Ok(records.into_iter().map(|(_, ip)| ip).collect())
     }
 
-    fn update_request<'a>(&'a mut self, domain: &str) -> UpdateRequestBuilder<'a> {
-        UpdateRequestBuilder::new(self, domain)
+    async fn refresh(&mut self) -> Result<()> {
+        self.fetch().await.map(drop)
     }
 
-    async fn execute_request(&mut self, request: RecordUpdateRequest) -> Result<UpdateSummary> {
-        let existing = self.address_records(&request.domain).await?;
-        let plan = plan_changes(&existing, &request);
-        let zone_id = self.zone_id().await?;
-        let records_url = format!("{BASE_URL}/zones/{zone_id}/dns_records");
+    async fn add(&mut self, ip: IpAddr, ttl: Option<u32>) -> Result<()> {
+        let url = self.records_url().await?;
+        let request = self
+            .client
+            .post(url)
+            .json(&RecordBody::new(&self.domain, ip, ttl));
+        let record: DnsRecord = self
+            .call(request)
+            .await
+            .inspect_err(|_| self.records = None)?;
+        log::debug!("{}: created record {} for {ip}", self.domain, record.id);
+        if let Some(records) = &mut self.records {
+            records.push((record.id, ip));
+        }
+        Ok(())
+    }
 
-        for (id, ip) in &plan.repoint {
-            // PATCH keeps fields we don't send, e.g. proxied, comment and tags
-            let http = self
-                .client
-                .patch(format!("{records_url}/{id}"))
-                .json(&RecordBody::new(&request.domain, *ip, request.ttl));
-            let _: DnsRecord = self.call(http).await?;
-            log::debug!("{}: re-pointed record {id} to {ip}", request.domain);
-        }
-        for id in &plan.delete {
-            let http = self.client.delete(format!("{records_url}/{id}"));
-            let _: Deleted = self.call(http).await?;
-            log::debug!("{}: deleted record {id}", request.domain);
-        }
-        for ip in &plan.create {
-            let http = self.client.post(&records_url).json(&RecordBody::new(
-                &request.domain,
-                *ip,
-                request.ttl,
-            ));
-            let _: DnsRecord = self.call(http).await?;
-            log::debug!("{}: created record for {ip}", request.domain);
-        }
+    async fn replace(&mut self, old: IpAddr, new: IpAddr, ttl: Option<u32>) -> Result<()> {
+        let id = self.record_id(old).await?;
+        let url = self.records_url().await?;
+        // PATCH keeps fields we don't send, e.g. proxied, comment and tags
+        let request = self
+            .client
+            .patch(format!("{url}/{id}"))
+            .json(&RecordBody::new(&self.domain, new, ttl));
+        let _: DnsRecord = self
+            .call(request)
+            .await
+            .inspect_err(|_| self.records = None)?;
+        log::debug!(
+            "{}: re-pointed record {id} from {old} to {new}",
+            self.domain
+        );
+        replace_cached(&mut self.records, &id, new);
+        Ok(())
+    }
 
-        Ok(plan.summary())
+    async fn delete(&mut self, ip: IpAddr) -> Result<()> {
+        let id = self.record_id(ip).await?;
+        let url = self.records_url().await?;
+        let request = self.client.delete(format!("{url}/{id}"));
+        let _: Deleted = self
+            .call(request)
+            .await
+            .inspect_err(|_| self.records = None)?;
+        log::debug!("{}: deleted record {id} for {ip}", self.domain);
+        delete_cached(&mut self.records, &id);
+        Ok(())
     }
 }
 
@@ -314,5 +403,29 @@ mod tests {
                 ("b".to_string(), "2001:db8::1".parse().unwrap()),
             ]
         );
+    }
+
+    #[test]
+    fn cache_updates() {
+        let ip = |s: &str| -> IpAddr { s.parse().unwrap() };
+        let mut records = Some(vec![
+            ("a".to_string(), ip("192.0.2.1")),
+            ("b".to_string(), ip("2001:db8::1")),
+        ]);
+        assert_eq!(
+            find_id(records.as_deref().unwrap(), ip("2001:db8::1")),
+            Some("b".to_string())
+        );
+        assert_eq!(find_id(records.as_deref().unwrap(), ip("192.0.2.9")), None);
+
+        replace_cached(&mut records, "b", ip("192.0.2.2"));
+        delete_cached(&mut records, "a");
+        assert_eq!(records, Some(vec![("b".to_string(), ip("192.0.2.2"))]));
+
+        // nothing cached: nothing to update
+        let mut none = None;
+        replace_cached(&mut none, "b", ip("192.0.2.2"));
+        delete_cached(&mut none, "b");
+        assert_eq!(none, None);
     }
 }

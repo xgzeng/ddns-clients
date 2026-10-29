@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use ddns_clients::{
@@ -70,6 +70,10 @@ pub struct Config {
     /// Check interval in seconds.
     #[serde(default = "default_check_interval")]
     pub interval: u64,
+    /// Seconds after which providers read their records again, to notice
+    /// changes made outside ddnsd; 0 never does.
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval: u64,
     /// Default for providers that don't set it; 0 means the provider's default.
     #[serde(default = "default_ttl")]
     pub ttl: u32,
@@ -177,6 +181,11 @@ impl Config {
         (ttl != 0).then_some(ttl)
     }
 
+    /// How often providers read their records again; `None` never.
+    pub fn refresh_interval(&self) -> Option<Duration> {
+        (self.refresh_interval != 0).then(|| Duration::from_secs(self.refresh_interval))
+    }
+
     pub fn resolvers(&self) -> Vec<AnyResolver> {
         self.resolvers.iter().map(AnyResolver::from).collect()
     }
@@ -188,6 +197,10 @@ fn yes() -> bool {
 
 fn default_check_interval() -> u64 {
     300
+}
+
+fn default_refresh_interval() -> u64 {
+    3600
 }
 
 fn default_ttl() -> u32 {
@@ -241,6 +254,7 @@ zone = "example.com"
             r#"
 ipv4 = false
 interval = 60
+refresh_interval = 0
 ttl = 0
 max_records = 4
 replace_only = true
@@ -269,6 +283,7 @@ replace_only = false
         )
         .unwrap();
         assert_eq!(config.interval, 60);
+        assert_eq!(config.refresh_interval(), None);
         assert_eq!(
             config.resolvers,
             vec![
@@ -304,6 +319,7 @@ replace_only = false
     fn defaults() {
         let config = load("defaults", MINIMAL).unwrap();
         assert_eq!(config.interval, 300);
+        assert_eq!(config.refresh_interval(), Some(Duration::from_secs(3600)));
         assert_eq!(config.resolvers, default_resolvers());
 
         let targets = config.targets().unwrap();

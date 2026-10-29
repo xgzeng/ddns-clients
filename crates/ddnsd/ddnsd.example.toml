@@ -6,6 +6,9 @@
 # Top-level settings must come before the first [provider.<name>] table.
 
 interval = 300                 # seconds between checks, default 300
+refresh_interval = 3600        # seconds after which records are read again from the
+                               # provider, warning about changes made elsewhere;
+                               # 0 = never; default 3600
 resolvers = [                  # tried in order per family; default: icanhazip, local
   { type = "icanhazip" },
   { type = "local" },          # global addresses of local interfaces
