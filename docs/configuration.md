@@ -101,7 +101,7 @@ appended:
 |---|---|
 | `home` | `home.example.com` |
 | `home.example.com` | `home.example.com` |
-| `example.com` | `example.com`, the zone's root |
+| `example.com` or empty (`""`) | `example.com`, the zone's root |
 | `*` | `*.example.com` |
 | `home.example.org` | `home.example.org.example.com` |
 

@@ -22,8 +22,8 @@ pub struct ProviderConfig {
     pub password: Option<String>,
     /// No-IP asks for `Company NameOfProgram/Version maintainer-contact@example.com`.
     pub user_agent: Option<String>,
-    /// With `zone`, `<domain>.<zone>` unless it already ends with the zone;
-    /// defaults to `<hostname>.<zone>`.
+    /// With `zone`, `<domain>.<zone>` unless it already ends with the zone, and
+    /// the zone itself if empty; defaults to `<hostname>.<zone>`.
     pub domain: Option<String>,
     pub ipv4: Option<bool>,
     pub ipv6: Option<bool>,
@@ -135,6 +135,7 @@ impl ProviderConfig {
             bail!("invalid zone {zone:?}: must have at least two labels");
         }
         let domain = match &self.domain {
+            Some(domain) if domain.is_empty() => return Ok(zone.clone()),
             Some(domain) => domain.clone(),
             None => {
                 let hostname = hostname::get()?.to_string_lossy().into_owned();
@@ -534,6 +535,7 @@ replace_only = false
             ("*.example.com", "*.example.com"),
             ("HOME.Example.COM", "HOME.Example.COM"),
             ("example.com", "example.com"),
+            ("", "example.com"),
             // only whole labels match the zone
             ("notexample.com", "notexample.com.example.com"),
         ] {
@@ -548,7 +550,6 @@ replace_only = false
         let long_label = "a".repeat(64);
         let long_name = ["a".repeat(60).as_str(); 5].join(".");
         for domain in [
-            "",
             "https://home.example.com/",
             "home.example.com:443",
             "home example",
@@ -611,6 +612,8 @@ replace_only = false
         );
         let err = load("noiplabel", &provider("myhost")).unwrap_err();
         assert!(err.to_string().contains("must be a full name"), "{err}");
+        let err = load("noipempty", &provider("")).unwrap_err();
+        assert!(err.to_string().contains("invalid domain"), "{err}");
     }
 
     #[test]
