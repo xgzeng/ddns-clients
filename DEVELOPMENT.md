@@ -7,6 +7,8 @@
 | `crates/ddns-clients` | Library: `IpResolver` trait and resolvers (`resolve/`); `DynDnsProvider` trait with the primitive record operations on one domain, and the providers with their record caches (`providers/`); `DynDnsClient`, which plans the operations (`client/plan.rs`) and adds the address-family restriction and `replace_only`, and its builder (`client.rs`) |
 | `crates/ddnsd` | Daemon: TOML config (`config.rs`), and the `Daemon` (`main.rs`) that keeps every provider's domain at the resolved IPs within `max_records`, with its update loop, periodic refresh and `dry-run` |
 | `debian/` | Debian packaging of `ddnsd` |
+| `docs/` | User documentation: the `ddnsd` configuration file |
+| `openwrt/` | OpenWrt packaging of `ddnsd` |
 | `scripts/` | Helper scripts, e.g. `build-deb.sh` |
 | `.github/workflows/` | CI and releases |
 
@@ -76,8 +78,9 @@ may block the client's IP.
    pass them on in `Config::client`.
 5. Add a live test module to `tests/live.rs`, reading `DDNS_<PROVIDER>_*`
    variables.
-6. Document it: the provider tables in `README.md`, the example config, the
-   man page `debian/ddnsd.8` and the package description in `debian/control`.
+6. Document it: the provider table in `README.md`, `docs/configuration.md`, the
+   example config, the man page `debian/ddnsd.8` and the package descriptions in
+   `debian/control` and `openwrt/package.sh`.
 
 ## Debian package
 
@@ -95,12 +98,38 @@ podman container (`DEBIAN_IMAGE` picks another release) and writes the packages
 to `target/debian/`. The source tree is mounted as an overlay, so the build
 leaves it untouched.
 
+## OpenWrt package
+
+OpenWrt 25.12 replaced opkg with apk, so 24.10 and older can't install these
+packages. `openwrt/package.sh` packages a static binary with `apk mkpkg`, without
+the OpenWrt SDK. A static binary runs on every CPU of its architecture, so one
+aarch64 binary becomes a package per OpenWrt architecture, whose name `apk`
+checks against `/etc/apk/arch`. Other architectures, such as `mipsel_24kc` and
+`arm_cortex-a7`, have no package yet: they need a static binary from
+`build.yml` and their names added to its `apk` job.
+
+`mise run apk` (`scripts/build-apk.sh`) builds the binary and the packages in a
+`rust:alpine` podman container and writes them to `target/openwrt/`:
+
+```sh
+mise run apk                              # x86_64
+APK_PLATFORM=linux/arm64 mise run apk     # aarch64, emulated, needs qemu-user-static
+```
+
+To try a package, `docker.io/openwrt/rootfs` runs OpenWrt with procd:
+
+```sh
+podman run -d --name openwrt -v "$PWD/target/openwrt":/pkgs:ro \
+  --entrypoint /sbin/init docker.io/openwrt/rootfs:x86_64-25.12.6
+podman exec -it openwrt sh
+```
+
 ## CI and releases
 
 GitHub Actions lints, tests and builds every push to `main` and every pull
 request (`ci.yml`, using the shared jobs in `build.yml`). Pushing a
 `v<version>` tag runs `release.yml`, which publishes a GitHub release with the
-static musl binaries, the Debian packages and `SHA256SUMS`.
+static musl binaries, the Debian packages, the OpenWrt packages and `SHA256SUMS`.
 
 The tag must match the version in `Cargo.toml` and `debian/changelog`:
 

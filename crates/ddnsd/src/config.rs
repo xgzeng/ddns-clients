@@ -22,7 +22,8 @@ pub struct ProviderConfig {
     pub password: Option<String>,
     /// No-IP asks for `Company NameOfProgram/Version maintainer-contact@example.com`.
     pub user_agent: Option<String>,
-    /// Defaults to `<hostname>.<zone>`.
+    /// With `zone`, `<domain>.<zone>` unless it already ends with the zone;
+    /// defaults to `<hostname>.<zone>`.
     pub domain: Option<String>,
     pub ipv4: Option<bool>,
     pub ipv6: Option<bool>,
@@ -37,6 +38,8 @@ pub enum ResolverConfig {
     Icanhazip,
     Ipify,
     Http {
+        /// For the address families without their own URL below.
+        url: Option<String>,
         ipv4_url: Option<String>,
         ipv6_url: Option<String>,
     },
@@ -49,12 +52,32 @@ impl From<&ResolverConfig> for AnyResolver {
         match config {
             ResolverConfig::Icanhazip => HttpResolver::icanhazip().into(),
             ResolverConfig::Ipify => HttpResolver::ipify().into(),
-            ResolverConfig::Http { ipv4_url, ipv6_url } => {
-                HttpResolver::new(ipv4_url.clone(), ipv6_url.clone()).into()
-            }
+            ResolverConfig::Http {
+                url,
+                ipv4_url,
+                ipv6_url,
+            } => HttpResolver::new(
+                ipv4_url.as_ref().or(url.as_ref()).cloned(),
+                ipv6_url.as_ref().or(url.as_ref()).cloned(),
+            )
+            .into(),
             #[cfg(target_os = "linux")]
             ResolverConfig::Local => ddns_clients::resolve::LocalResolver.into(),
         }
+    }
+}
+
+impl ResolverConfig {
+    fn check(&self) -> Result<()> {
+        if let ResolverConfig::Http {
+            url: None,
+            ipv4_url: None,
+            ipv6_url: None,
+        } = self
+        {
+            bail!("http resolver: set url, or ipv4_url and/or ipv6_url");
+        }
+        Ok(())
     }
 }
 
@@ -92,6 +115,79 @@ pub struct Config {
     pub provider: BTreeMap<String, ProviderConfig>,
 }
 
+impl ProviderConfig {
+    /// Checks `zone` and `domain`, and returns the full name of the domain.
+    fn full_domain(&self, name: &str) -> Result<String> {
+        let Some(zone) = &self.zone else {
+            let Some(domain) = &self.domain else {
+                bail!("domain must be set for this provider");
+            };
+            check_domain_name(domain, true)
+                .with_context(|| format!("invalid domain {domain:?}"))?;
+            if !domain.contains('.') {
+                bail!("invalid domain {domain:?}: must be a full name without a zone");
+            }
+            return Ok(domain.clone());
+        };
+
+        check_domain_name(zone, false).with_context(|| format!("invalid zone {zone:?}"))?;
+        if !zone.contains('.') {
+            bail!("invalid zone {zone:?}: must have at least two labels");
+        }
+        let domain = match &self.domain {
+            Some(domain) => domain.clone(),
+            None => {
+                let hostname = hostname::get()?.to_string_lossy().into_owned();
+                log::info!("provider {name}: domain is not set, using hostname {hostname}");
+                hostname
+            }
+        };
+        check_domain_name(&domain, true).with_context(|| format!("invalid domain {domain:?}"))?;
+        if in_zone(&domain, zone) {
+            return Ok(domain);
+        }
+        let full = format!("{domain}.{zone}");
+        check_domain_name(&full, true).with_context(|| format!("invalid domain {full:?}"))?;
+        Ok(full)
+    }
+}
+
+/// Whether `domain` is `zone` or below it; both must be valid names.
+fn in_zone(domain: &str, zone: &str) -> bool {
+    let (domain, zone) = (domain.to_ascii_lowercase(), zone.to_ascii_lowercase());
+    domain == zone || domain.ends_with(&format!(".{zone}"))
+}
+
+/// Checks that `name` is only a DNS name, in ASCII (so internationalized names
+/// are written in punycode) and without a trailing dot. With `wildcard`, the
+/// first label may be `*`.
+fn check_domain_name(name: &str, wildcard: bool) -> Result<()> {
+    if name.len() > 253 {
+        bail!("longer than 253 characters");
+    }
+    for (i, label) in name.split('.').enumerate() {
+        if wildcard && i == 0 && label == "*" {
+            continue;
+        }
+        if label.is_empty() {
+            bail!("empty label");
+        }
+        if label.len() > 63 {
+            bail!("label {label:?} is longer than 63 characters");
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            bail!("label {label:?} starts or ends with a hyphen");
+        }
+        if let Some(c) = label
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')))
+        {
+            bail!("label {label:?} contains {c:?}");
+        }
+    }
+    Ok(())
+}
+
 /// A configured provider with the top-level defaults applied.
 pub struct Target {
     pub name: String,
@@ -111,18 +207,17 @@ impl Config {
         if config.resolvers.is_empty() {
             bail!("resolvers must not be empty");
         }
+        for resolver in &config.resolvers {
+            resolver.check()?;
+        }
         if config.provider.is_empty() {
             bail!("no provider configured, add a [provider.<name>] table");
         }
         for (name, provider) in &mut config.provider {
-            if provider.domain.is_none() {
-                let Some(zone) = &provider.zone else {
-                    bail!("provider {name}: domain must be set for this provider");
-                };
-                let domain = format!("{}.{zone}", hostname::get()?.to_string_lossy());
-                log::info!("provider {name}: domain is not set, using {domain}");
-                provider.domain = Some(domain);
-            }
+            let domain = provider
+                .full_domain(name)
+                .map_err(|err| anyhow::anyhow!("provider {name}: {err:#}"))?;
+            provider.domain = Some(domain);
         }
         Ok(config)
     }
@@ -289,6 +384,7 @@ replace_only = false
             vec![
                 ResolverConfig::Ipify,
                 ResolverConfig::Http {
+                    url: None,
                     ipv4_url: Some("https://ip4.example.com".into()),
                     ipv6_url: None,
                 },
@@ -358,6 +454,163 @@ replace_only = false
     fn rejects_empty_resolvers() {
         let err = load("noresolver", &format!("resolvers = []\n{MINIMAL}")).unwrap_err();
         assert!(err.to_string().contains("resolvers"));
+    }
+
+    #[test]
+    fn http_resolver_with_single_url() {
+        let config = load(
+            "singleurl",
+            &format!(
+                "resolvers = [{{ type = \"http\", url = \"https://ip.example.com\" }}]\n{MINIMAL}"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            config.resolvers,
+            vec![ResolverConfig::Http {
+                url: Some("https://ip.example.com".into()),
+                ipv4_url: None,
+                ipv6_url: None,
+            }]
+        );
+        let debug = format!("{:?}", config.resolvers());
+        assert_eq!(
+            debug.matches("https://ip.example.com").count(),
+            2,
+            "{debug}"
+        );
+    }
+
+    #[test]
+    fn http_resolver_family_url_overrides_url() {
+        // the debug output lists the IPv4 URL, then the IPv6 URL
+        for (keys, expected) in [
+            (
+                r#"url = "https://a", ipv6_url = "https://b""#,
+                ["https://a", "https://b"],
+            ),
+            (
+                r#"url = "https://a", ipv4_url = "https://b""#,
+                ["https://b", "https://a"],
+            ),
+        ] {
+            let config = load(
+                "override",
+                &format!("resolvers = [{{ type = \"http\", {keys} }}]\n{MINIMAL}"),
+            )
+            .unwrap();
+            let debug = format!("{:?}", config.resolvers());
+            let v4 = debug.find(expected[0]).expect(&debug);
+            let v6 = debug.rfind(expected[1]).expect(&debug);
+            assert!(v4 < v6, "{debug}");
+            assert_eq!(debug.matches("https://").count(), 2, "{debug}");
+        }
+    }
+
+    #[test]
+    fn rejects_http_resolver_without_url() {
+        let err = load(
+            "nourl",
+            &format!("resolvers = [{{ type = \"http\" }}]\n{MINIMAL}"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("set url"), "{err}");
+    }
+
+    fn cloudflare(zone: &str, domain: &str) -> String {
+        format!(
+            "[provider.cloudflare]\napi_token = \"secret\"\nzone = {zone:?}\ndomain = {domain:?}\n"
+        )
+    }
+
+    #[test]
+    fn domain_is_completed_with_zone() {
+        for (domain, expected) in [
+            ("home", "home.example.com"),
+            ("a.home", "a.home.example.com"),
+            ("*", "*.example.com"),
+            // already ends with the zone
+            ("home.example.com", "home.example.com"),
+            ("*.example.com", "*.example.com"),
+            ("HOME.Example.COM", "HOME.Example.COM"),
+            ("example.com", "example.com"),
+            // only whole labels match the zone
+            ("notexample.com", "notexample.com.example.com"),
+        ] {
+            let config = load("complete", &cloudflare("example.com", domain)).unwrap();
+            let targets = config.targets().unwrap();
+            assert_eq!(targets[0].client.domain(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_domain() {
+        let long_label = "a".repeat(64);
+        let long_name = ["a".repeat(60).as_str(); 5].join(".");
+        for domain in [
+            "",
+            "https://home.example.com/",
+            "home.example.com:443",
+            "home example",
+            "home..example.com",
+            "home.example.com.",
+            ".home",
+            "-home",
+            "home-",
+            "*.*",
+            "a.*",
+            "h\u{f6}me",
+            long_label.as_str(),
+            long_name.as_str(),
+        ] {
+            let err = load("baddomain", &cloudflare("example.com", domain)).unwrap_err();
+            assert!(
+                err.to_string()
+                    .starts_with("provider cloudflare: invalid domain"),
+                "{domain}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_domain_too_long_with_zone() {
+        let domain = ["a".repeat(60).as_str(); 4].join(".");
+        let err = load("longdomain", &cloudflare("example.com", &domain)).unwrap_err();
+        assert!(err.to_string().contains("longer than 253"), "{err}");
+    }
+
+    #[test]
+    fn rejects_invalid_zone() {
+        for zone in [
+            "",
+            "example",
+            "https://example.com",
+            "example.com.",
+            "*.example.com",
+        ] {
+            let err = load("badzone", &cloudflare(zone, "home")).unwrap_err();
+            assert!(
+                err.to_string()
+                    .starts_with("provider cloudflare: invalid zone"),
+                "{zone}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_without_zone_must_be_full() {
+        let provider = |domain: &str| {
+            format!(
+                "[provider.noip]\nusername = \"me\"\npassword = \"secret\"\ndomain = {domain:?}\n"
+            )
+        };
+        let config = load("noipfull", &provider("myhost.ddns.net")).unwrap();
+        assert_eq!(
+            config.targets().unwrap()[0].client.domain(),
+            "myhost.ddns.net"
+        );
+        let err = load("noiplabel", &provider("myhost")).unwrap_err();
+        assert!(err.to_string().contains("must be a full name"), "{err}");
     }
 
     #[test]

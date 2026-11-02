@@ -30,6 +30,9 @@ Each [GitHub release](https://github.com/xgzeng/ddns-clients/releases) has:
   Linux distribution (`chmod +x` after downloading);
 - `ddnsd_<version>_amd64.deb` and `ddnsd_<version>_arm64.deb`: packages for
   Debian 13 (trixie) and later;
+- `ddnsd-<version>-r1_<arch>.apk`: packages for OpenWrt 25.12 and later, on
+  `x86_64`, `aarch64_generic`, `aarch64_cortex-a53`, `aarch64_cortex-a72` and
+  `aarch64_cortex-a76`;
 - `SHA256SUMS`.
 
 The Debian package installs `/usr/sbin/ddnsd`, a hardened `ddnsd.service`
@@ -45,6 +48,21 @@ sudo systemctl start ddnsd
 
 The service isn't restarted when ddnsd exits because every provider rejected
 its updates; fix the config and start it again.
+
+The OpenWrt package installs `/usr/sbin/ddnsd`, an enabled `ddnsd` procd service
+and an example config, and takes 8-10 MiB of storage before the filesystem's
+compression. Pick the package matching `cat /etc/apk/arch`; it isn't signed, so
+`apk` needs `--allow-untrusted`. As on Debian, the service starts once
+`/etc/ddnsd.toml` exists and isn't restarted when every provider rejected its
+updates. `sysupgrade` keeps the config, and the logs are in `logread -e ddnsd`.
+
+```sh
+apk add --allow-untrusted ./ddnsd-<version>-r1_<arch>.apk
+cp /usr/share/ddnsd/ddnsd.example.toml /etc/ddnsd.toml
+chmod 600 /etc/ddnsd.toml
+vi /etc/ddnsd.toml
+/etc/init.d/ddnsd start
+```
 
 To build from source, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
@@ -84,48 +102,18 @@ changes are logged (e.g. `myhost.example.com: replace 192.0.2.1 with
 192.0.2.2 (dry run, not carried out)`), the providers are only read from, and
 it exits with an error if any of them failed.
 
-The config file is TOML and must not be readable by group/others
-(`chmod 600`). Each `[provider.<name>]` table is one domain on one provider;
-the public IPs are resolved once per check and pushed to all of them. `type`
-defaults to the table's name. Top-level settings must come before the first
-provider table; `ipv4`, `ipv6`, `ttl`, `max_records` and `replace_only` are
-defaults that each provider can override.
+The config file is TOML and must not be readable by group/others (`chmod 600`).
+Each `[provider.<name>]` table is one domain on one provider, whose type is
+taken from the name:
 
 ```toml
-interval = 300                 # seconds between checks, default 300
-refresh_interval = 3600        # seconds after which records are read again from the
-                               # provider, warning about changes made elsewhere; 0 = never;
-                               # default 3600
-resolvers = [                  # tried in order per family; default: icanhazip, local
-  { type = "icanhazip" },
-  { type = "ipify" },
-  # any service echoing the client IP as plain text
-  { type = "http", ipv4_url = "https://ipv4.example.net", ipv6_url = "https://ipv6.example.net" },
-  { type = "local" },          # Linux only: global addresses of local interfaces
-]
-ipv4 = true                    # default true
-ipv6 = true                    # default true
-ttl = 600                      # 0 = provider default; default 600
-max_records = 2                # max A/AAAA records kept, default 2
-replace_only = false           # only re-point existing records, never create or
-                               # delete any (e.g. records set up by hand); default false
-
-[provider.home]
-type = "cloudflare"
+[provider.cloudflare]
 api_token = "..."              # needs Zone:Read and DNS:Edit
 zone = "example.com"
-domain = "home.example.com"    # optional, default <hostname>.<zone>
-
-[provider.noip]                # type = "noip" from the name
-username = "..."               # account email/username, or a DDNS key's username
-password = "..."
-user_agent = "..."             # optional; No-IP asks for "Company Program/Version contact@example.com"
-domain = "myhost.ddns.net"     # required
-ipv6 = false                   # overrides the default
+domain = "home.example.com"
 ```
 
-The provider keys are passed to `DynDnsClient`, so the daemon rejects unknown
-types and missing or unused keys at startup.
+See [docs/configuration.md](docs/configuration.md) for all settings.
 
 When a provider rejects an update in a way only the user can fix (e.g.
 No-IP's `badauth`, `nohost`, `abuse`), the daemon logs an error and stops

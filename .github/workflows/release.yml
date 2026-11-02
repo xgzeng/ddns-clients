@@ -1,5 +1,5 @@
 # Publishes a GitHub release for a pushed `v<version>` tag, with the static
-# ddnsd binaries and Debian packages.
+# ddnsd binaries, Debian packages and OpenWrt packages.
 name: Release
 
 on:

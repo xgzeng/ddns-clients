@@ -8,3 +8,7 @@ run = "cargo test -p ddns-clients --test live -- --include-ignored --nocapture"
 [tasks.deb]
 description = "Build the Debian package in a Debian container (output in target/debian)"
 run = "scripts/build-deb.sh"
+
+[tasks.apk]
+description = "Build the OpenWrt packages in an Alpine container (output in target/openwrt)"
+run = "scripts/build-apk.sh"

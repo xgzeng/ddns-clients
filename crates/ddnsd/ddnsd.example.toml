@@ -27,7 +27,8 @@ replace_only = false           # only re-point existing records, never create or
 [provider.cloudflare]
 api_token = "..."              # needs Zone:Read and DNS:Edit
 zone = "example.com"
-domain = "myhost.example.com"  # optional for cloudflare, default <hostname>.<zone>
+domain = "myhost.example.com"  # optional for cloudflare, default <hostname>; the zone
+                               # is appended unless it already ends with it
 
 # [provider.noip]
 # username = "..."

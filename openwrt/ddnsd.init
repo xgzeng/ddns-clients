@@ -1,0 +1,30 @@
+#!/bin/sh /etc/rc.common
+# procd service for ddnsd. Logs go to the system log, see `logread -e ddnsd`.
+
+START=95
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/sbin/ddnsd
+CONF=/etc/ddnsd.toml
+
+start_service() {
+	# start once the administrator has written the config, see
+	# /usr/share/ddnsd/ddnsd.example.toml
+	if [ ! -f "$CONF" ]; then
+		echo "ddnsd: $CONF doesn't exist, not starting" >&2
+		return 1
+	fi
+
+	procd_open_instance
+	procd_set_param command "$PROG" -c "$CONF"
+	# no respawn: ddnsd only exits on errors that need a configuration fix
+	# (e.g. credentials a provider rejected); restarting would just repeat
+	# the rejected request
+	procd_set_param stderr 1
+	# `reload` restarts the service if the config changed, and `start` does
+	# after a package upgrade replaced the binary
+	procd_set_param file "$CONF" "$PROG"
+	procd_set_param no_new_privs 1
+	procd_close_instance
+}
