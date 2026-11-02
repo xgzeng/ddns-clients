@@ -46,15 +46,12 @@ sudoedit /etc/ddnsd.toml
 sudo systemctl start ddnsd
 ```
 
-The service isn't restarted when ddnsd exits because every provider rejected
-its updates; fix the config and start it again.
-
 The OpenWrt package installs `/usr/sbin/ddnsd`, an enabled `ddnsd` procd service
 and an example config, and takes 8-10 MiB of storage before the filesystem's
 compression. Pick the package matching `cat /etc/apk/arch`; it isn't signed, so
 `apk` needs `--allow-untrusted`. As on Debian, the service starts once
-`/etc/ddnsd.toml` exists and isn't restarted when every provider rejected its
-updates. `sysupgrade` keeps the config, and the logs are in `logread -e ddnsd`.
+`/etc/ddnsd.toml` exists. `sysupgrade` keeps the config, and the logs are in
+`logread -e ddnsd`.
 
 ```sh
 apk add --allow-untrusted ./ddnsd-<version>-r1_<arch>.apk
@@ -115,10 +112,7 @@ domain = "home.example.com"
 
 See [docs/configuration.md](docs/configuration.md) for all settings.
 
-When a provider rejects an update in a way only the user can fix (e.g.
-No-IP's `badauth`, `nohost`, `abuse`), the daemon logs an error and stops
-updating that provider; it exits once every provider has been rejected. After
-server errors it waits as long as the provider asks (30 minutes for No-IP)
-before updating that provider again.
+After server errors the daemon waits as long as the provider asks (30 minutes
+for No-IP) before updating that provider again.
 
 Log level is controlled with `RUST_LOG` (default `info`).

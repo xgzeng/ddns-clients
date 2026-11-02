@@ -3,12 +3,12 @@ resolver = "3"
 members = ["crates/ddns-clients", "crates/ddnsd"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
 
 [workspace.dependencies]
 ddns-clients = { path = "crates/ddns-clients" }
-log = "0.4.27"
-tokio = "1.44.2"
+log = "0.4"
+tokio = "1.44"

@@ -1,3 +1,16 @@
+ddns-clients (0.0.3) unstable; urgency=medium
+
+  * New OpenWrt packages for OpenWrt 25.12 and later.
+  * HTTP resolvers: new url setting for both address families, overridden by
+    ipv4_url and ipv6_url; each family now connects only over that family. An
+    http resolver without any URL is now an error.
+  * A domain that doesn't end with its zone gets the zone appended, and an
+    empty domain is the zone's root. domain and zone must now be valid DNS
+    names.
+  * New configuration reference, /usr/share/doc/ddnsd/configuration.md.gz.
+
+ -- XiaoGuang Zeng <xgzeng@gmail.com>  Mon, 02 Nov 2026 08:20:54 -0500
+
 ddns-clients (0.0.2) unstable; urgency=medium
 
   * The config file is now TOML: /etc/ddnsd.toml replaces /etc/ddnsd.yaml.
