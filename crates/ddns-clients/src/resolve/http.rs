@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use super::{IpFamily, IpResolver};
+use super::IpResolver;
 
 /// Resolves addresses by querying an online service that echoes the client's
 /// IP as plain text, with one URL for both families or one per family.
@@ -57,13 +57,13 @@ impl HttpResolver {
     ///
     /// If the HTTP client can't be initialized, as [`reqwest::Client::new`].
     pub fn new(ipv4_url: Option<String>, ipv6_url: Option<String>) -> Self {
-        let endpoint = |family, url| Endpoint {
-            client: family_client(reqwest::Client::builder(), family),
+        let endpoint = |local_address, url| Endpoint {
+            client: family_client(reqwest::Client::builder(), local_address),
             url,
         };
         HttpResolver {
-            ipv4: ipv4_url.map(|url| endpoint(IpFamily::V4, url)),
-            ipv6: ipv6_url.map(|url| endpoint(IpFamily::V6, url)),
+            ipv4: ipv4_url.map(|url| endpoint(Ipv4Addr::UNSPECIFIED.into(), url)),
+            ipv6: ipv6_url.map(|url| endpoint(Ipv6Addr::UNSPECIFIED.into(), url)),
         }
     }
 
@@ -95,14 +95,11 @@ impl HttpResolver {
     }
 }
 
-/// Builds a client that only connects over `family`: bound to that family's
-/// unspecified address, it skips the host's addresses of the other one. Being
-/// per family, it also can't reuse a connection of the other family.
-fn family_client(builder: reqwest::ClientBuilder, family: IpFamily) -> reqwest::Client {
-    let local_address = match family {
-        IpFamily::V4 => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        IpFamily::V6 => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-    };
+/// Builds a client bound to `local_address`, a family's unspecified address,
+/// so it only connects over that family and skips the host's addresses of the
+/// other one. Being per family, it also can't reuse a connection of the other
+/// family.
+fn family_client(builder: reqwest::ClientBuilder, local_address: IpAddr) -> reqwest::Client {
     builder
         .local_address(local_address)
         .build()
@@ -172,16 +169,16 @@ mod tests {
     fn same_url_resolver(addrs: &[SocketAddr]) -> HttpResolver {
         let host = "dual-stack.test";
         let url = format!("http://{host}:{}", addrs[0].port());
-        let endpoint = |family| Endpoint {
+        let endpoint = |local_address| Endpoint {
             client: family_client(
                 reqwest::Client::builder().resolve_to_addrs(host, addrs),
-                family,
+                local_address,
             ),
             url: url.clone(),
         };
         HttpResolver {
-            ipv4: Some(endpoint(IpFamily::V4)),
-            ipv6: Some(endpoint(IpFamily::V6)),
+            ipv4: Some(endpoint(Ipv4Addr::UNSPECIFIED.into())),
+            ipv6: Some(endpoint(Ipv6Addr::UNSPECIFIED.into())),
         }
     }
 

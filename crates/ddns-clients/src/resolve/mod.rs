@@ -12,7 +12,7 @@ mod http;
 #[cfg(target_os = "linux")]
 mod local;
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,25 +20,6 @@ use async_trait::async_trait;
 pub use http::HttpResolver;
 #[cfg(target_os = "linux")]
 pub use local::LocalResolver;
-
-/// An IP address family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum IpFamily {
-    /// IPv4 (A records).
-    V4,
-    /// IPv6 (AAAA records).
-    V6,
-}
-
-impl IpFamily {
-    /// The family of `ip`.
-    pub fn of(ip: &IpAddr) -> Self {
-        match ip {
-            IpAddr::V4(_) => IpFamily::V4,
-            IpAddr::V6(_) => IpFamily::V6,
-        }
-    }
-}
 
 /// A source of this host's public IP addresses.
 ///
@@ -60,19 +41,20 @@ pub trait IpResolver: Send + Sync {
 #[async_trait]
 impl<R: IpResolver> IpResolver for Vec<R> {
     async fn resolve_a(&self) -> Result<Vec<Ipv4Addr>> {
-        first_found(self, IpFamily::V4, |resolver| resolver.resolve_a()).await
+        first_found(self, "IPv4", |resolver| resolver.resolve_a()).await
     }
 
     async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>> {
-        first_found(self, IpFamily::V6, |resolver| resolver.resolve_aaaa()).await
+        first_found(self, "IPv6", |resolver| resolver.resolve_aaaa()).await
     }
 }
 
 /// The first non-empty result of `resolve` on each of `resolvers`, which
-/// resolve `family`; see the `Vec` impl of [`IpResolver`].
+/// resolve `family` ("IPv4" or "IPv6", for logging); see the `Vec` impl of
+/// [`IpResolver`].
 async fn first_found<'a, R, T, F, Fut>(
     resolvers: &'a [R],
-    family: IpFamily,
+    family: &str,
     resolve: F,
 ) -> Result<Vec<T>>
 where
@@ -85,7 +67,7 @@ where
             Ok(addrs) if !addrs.is_empty() => return Ok(addrs),
             Ok(_) => last_err = None,
             Err(err) => {
-                log::warn!("resolve {family:?} address failed: {err:#}");
+                log::warn!("resolve {family} address failed: {err:#}");
                 last_err = Some(err);
             }
         }
@@ -172,10 +154,6 @@ mod tests {
         }
     }
 
-    fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
-    }
-
     fn v4(s: &str) -> Ipv4Addr {
         s.parse().unwrap()
     }
@@ -189,12 +167,6 @@ mod tests {
             .build()
             .unwrap()
             .block_on(fut)
-    }
-
-    #[test]
-    fn family_of() {
-        assert_eq!(IpFamily::of(&ip("1.1.1.1")), IpFamily::V4);
-        assert_eq!(IpFamily::of(&ip("::1")), IpFamily::V6);
     }
 
     #[test]
