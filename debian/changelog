@@ -1,3 +1,11 @@
+ddns-clients (0.0.7) unstable; urgency=medium
+
+  * OpenWrt: packages for aarch64_generic, aarch64_cortex-a53,
+    aarch64_cortex-a72 and aarch64_cortex-a76 again; apk refuses a
+    package whose architecture /etc/apk/arch doesn't list.
+
+ -- XiaoGuang Zeng <xgzeng@gmail.com>  Tue, 03 Nov 2026 09:26:14 -0500
+
 ddns-clients (0.0.6) unstable; urgency=medium
 
   * Resolvers: the addresses of all resolvers are merged, failed ones
