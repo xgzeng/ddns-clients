@@ -1,3 +1,23 @@
+ddns-clients (0.0.6) unstable; urgency=medium
+
+  * Resolvers: the addresses of all resolvers are merged, failed ones
+    skipped; the new nested `all` and `any` resolver types require every
+    resolver to succeed or skip failed ones. The default is now local AND
+    (icanhazip OR ipify).
+  * The local resolver takes an optional interface.
+  * On Linux, the addresses are looked up again at the next tick after
+    the global addresses of a local interface change, e.g. after a WAN
+    reconnect; watch_interface limits this to one interface.
+  * The first public addresses found are logged.
+  * OpenWrt: the package installs a minimal /etc/ddnsd.toml with every
+    provider commented out.
+  * Library: resolve::CompositeResolver replaces the Vec fallback list;
+    resolve::AddressMonitor watches local addresses; LocalResolver is
+    built with LocalResolver::default(); IpResolver, DynDnsClient and
+    DynDnsClientBuilder no longer implement or require Debug.
+
+ -- XiaoGuang Zeng <xgzeng@gmail.com>  Tue, 03 Nov 2026 08:52:51 -0500
+
 ddns-clients (0.0.5) unstable; urgency=medium
 
   * New PKARR provider: A and AAAA records signed with an Ed25519 key,
