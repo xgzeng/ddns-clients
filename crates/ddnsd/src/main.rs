@@ -182,6 +182,7 @@ struct Daemon {
 async fn main() -> Result<()> {
     let args = Args::parse();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    log::info!("ddnsd {} starting", env!("CARGO_PKG_VERSION"));
 
     let config = Config::load(&args.config)
         .with_context(|| format!("load {} failed", args.config.display()))?;
