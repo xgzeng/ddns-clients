@@ -27,7 +27,7 @@ export CARGO_PROFILE_RELEASE_STRIP=symbols
 cargo build --release --locked -p ddnsd
 case $(uname -m) in
   x86_64) arches=x86_64 ;;
-  aarch64) arches="aarch64_generic aarch64_cortex-a53 aarch64_cortex-a72 aarch64_cortex-a76" ;;
+  aarch64) arches=aarch64_generic ;;
   *) echo "error: no OpenWrt architectures known for $(uname -m)" >&2; exit 1 ;;
 esac
 openwrt/package.sh target/release/ddnsd /out $arches

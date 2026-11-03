@@ -72,7 +72,7 @@ for arch in "$@"; do
   SOURCE_DATE_EPOCH=0 apk mkpkg \
     --info "name:ddnsd" \
     --info "version:$version" \
-    --info "description:Dynamic DNS daemon for Cloudflare and No-IP" \
+    --info "description:Dynamic DNS daemon for Cloudflare, No-IP and PKARR" \
     --info "arch:$arch" \
     --info "license:MIT" \
     --info "origin:ddnsd" \

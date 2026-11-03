@@ -31,9 +31,8 @@ Each [GitHub release](https://github.com/xgzeng/ddns-clients/releases) has:
   Linux distribution (`chmod +x` after downloading);
 - `ddnsd_<version>_amd64.deb` and `ddnsd_<version>_arm64.deb`: packages for
   Debian 13 (trixie) and later;
-- `ddnsd-<version>-r1_<arch>.apk`: packages for OpenWrt 25.12 and later, on
-  `x86_64`, `aarch64_generic`, `aarch64_cortex-a53`, `aarch64_cortex-a72` and
-  `aarch64_cortex-a76`;
+- `ddnsd-<version>-r1_aarch64_generic.apk`: a package for OpenWrt 25.12 and
+  later, on `aarch64_generic`;
 - `SHA256SUMS`.
 
 The Debian package installs `/usr/sbin/ddnsd`, a hardened `ddnsd.service`
@@ -49,13 +48,13 @@ sudo systemctl start ddnsd
 
 The OpenWrt package installs `/usr/sbin/ddnsd`, an enabled `ddnsd` procd service
 and an example config, and takes 8-10 MiB of storage before the filesystem's
-compression. Pick the package matching `cat /etc/apk/arch`; it isn't signed, so
-`apk` needs `--allow-untrusted`. As on Debian, the service starts once
+compression. It installs where `cat /etc/apk/arch` lists `aarch64_generic`; it
+isn't signed, so `apk` needs `--allow-untrusted`. As on Debian, the service starts once
 `/etc/ddnsd.toml` exists. `sysupgrade` keeps the config, and the logs are in
 `logread -e ddnsd`.
 
 ```sh
-apk add --allow-untrusted ./ddnsd-<version>-r1_<arch>.apk
+apk add --allow-untrusted ./ddnsd-<version>-r1_aarch64_generic.apk
 cp /usr/share/ddnsd/ddnsd.example.toml /etc/ddnsd.toml
 chmod 600 /etc/ddnsd.toml
 vi /etc/ddnsd.toml
