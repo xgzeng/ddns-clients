@@ -5,9 +5,9 @@
 //! - [`HttpResolver`] asks an online "what is my IP" service.
 //! - [`LocalResolver`] (Linux only) reads the addresses of local interfaces.
 //!
-//! A [`CompositeResolver`] merges the addresses of several resolvers, skipping
-//! failed ones ([`any`](CompositeResolver::any)) or requiring all to succeed
-//! ([`all`](CompositeResolver::all)).
+//! A [`CompositeResolver`] combines several resolvers: the union of their
+//! addresses, skipping failed ones ([`any`](CompositeResolver::any)), or the
+//! addresses all of them found ([`all`](CompositeResolver::all)).
 
 mod http;
 #[cfg(target_os = "linux")]
@@ -36,14 +36,16 @@ pub trait IpResolver: Send + Sync {
     async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>>;
 }
 
-/// Merges the addresses of several resolvers, deduplicated and in the order of
-/// the resolvers, which are all asked at once.
+/// Combines the addresses of several resolvers, which are all asked at once,
+/// deduplicated and in the order of the resolvers.
 ///
-/// [`any`](Self::any) skips failed resolvers, logging their errors;
-/// [`all`](Self::all) fails if any of them fails. Composites nest, e.g. an
-/// `all` of the local addresses and an `any` of two echo services.
+/// [`any`](Self::any) is the union, skipping failed resolvers and logging their
+/// errors; [`all`](Self::all) is the intersection, and fails if any of them
+/// fails. Composites nest, e.g. an `all` of the local addresses and an `any` of
+/// two echo services: the local addresses that an echo service also sees.
 pub struct CompositeResolver {
-    /// Whether every resolver must succeed; otherwise failed ones are skipped.
+    /// Intersection, every resolver must succeed; otherwise union, failed ones
+    /// skipped.
     all: bool,
     resolvers: Vec<Box<dyn IpResolver>>,
 }
@@ -58,7 +60,8 @@ impl CompositeResolver {
         }
     }
 
-    /// AND: the addresses of all the resolvers; fails if any one fails.
+    /// AND: the addresses that every resolver found, in the order of the first;
+    /// fails if any one fails.
     pub fn all(resolvers: Vec<Box<dyn IpResolver>>) -> Self {
         CompositeResolver {
             all: true,
@@ -66,27 +69,37 @@ impl CompositeResolver {
         }
     }
 
-    /// Merges the results of `resolve` on each resolver, which resolve
+    /// Combines the results of `resolve` on each resolver, which resolve
     /// `family` ("IPv4" or "IPv6", for logging).
-    async fn merge<'a, T, F, Fut>(&'a self, family: &str, resolve: F) -> Result<Vec<T>>
+    async fn combine<'a, T, F, Fut>(&'a self, family: &str, resolve: F) -> Result<Vec<T>>
     where
         T: PartialEq,
         F: Fn(&'a dyn IpResolver) -> Fut,
         Fut: Future<Output = Result<Vec<T>>>,
     {
         let results = join_all(self.resolvers.iter().map(|resolver| resolve(&**resolver))).await;
-        let mut addrs = vec![];
-        let mut succeeded = false;
+        // `None` until a resolver succeeded
+        let mut addrs: Option<Vec<T>> = None;
         let mut last_err = None;
         for result in results {
             match result {
                 Ok(found) => {
-                    succeeded = true;
-                    for addr in found {
-                        if !addrs.contains(&addr) {
-                            addrs.push(addr);
+                    addrs = Some(match addrs.take() {
+                        Some(mut addrs) if self.all => {
+                            addrs.retain(|addr| found.contains(addr));
+                            addrs
                         }
-                    }
+                        // the union, which for `all` starts with the first
+                        addrs => {
+                            let mut addrs = addrs.unwrap_or_default();
+                            for addr in found {
+                                if !addrs.contains(&addr) {
+                                    addrs.push(addr);
+                                }
+                            }
+                            addrs
+                        }
+                    });
                 }
                 Err(err) if self.all => return Err(err),
                 // the last error is returned if all failed; log only the
@@ -98,13 +111,14 @@ impl CompositeResolver {
                 }
             }
         }
-        match last_err {
-            Some(err) if !succeeded => Err(err),
-            Some(skipped) => {
-                log::warn!("resolve {family} address failed: {skipped:#}");
-                Ok(addrs)
+        match (addrs, last_err) {
+            (None, Some(err)) => Err(err),
+            (addrs, skipped) => {
+                if let Some(skipped) = skipped {
+                    log::warn!("resolve {family} address failed: {skipped:#}");
+                }
+                Ok(addrs.unwrap_or_default())
             }
-            None => Ok(addrs),
         }
     }
 }
@@ -112,16 +126,18 @@ impl CompositeResolver {
 #[async_trait]
 impl IpResolver for CompositeResolver {
     async fn resolve_a(&self) -> Result<Vec<Ipv4Addr>> {
-        self.merge("IPv4", |resolver| resolver.resolve_a()).await
+        self.combine("IPv4", |resolver| resolver.resolve_a()).await
     }
 
     async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>> {
-        self.merge("IPv6", |resolver| resolver.resolve_aaaa()).await
+        self.combine("IPv6", |resolver| resolver.resolve_aaaa())
+            .await
     }
 }
 
-/// The default resolver: the global addresses of local interfaces (Linux
-/// only), and those <https://icanhazip.com> and <https://www.ipify.org> see.
+/// The default resolver: the global addresses of local interfaces that
+/// <https://icanhazip.com>, or <https://www.ipify.org> if it fails, also sees;
+/// on other systems, just what the echo service sees.
 pub fn default_resolvers() -> CompositeResolver {
     CompositeResolver::all(vec![
         #[cfg(target_os = "linux")]
@@ -213,15 +229,28 @@ mod tests {
     }
 
     #[test]
-    fn all_merges() {
+    fn all_intersects_in_order() {
         let resolver = CompositeResolver::all(vec![
-            fixed(Some(&["1.1.1.1"]), Some(&[])),
-            fixed(Some(&["2.2.2.2"]), Some(&[])),
+            fixed(Some(&["1.1.1.1", "2.2.2.2", "1.1.1.1"]), Some(&[])),
+            fixed(
+                Some(&["3.3.3.3", "2.2.2.2", "1.1.1.1"]),
+                Some(&["2001:4860::1"]),
+            ),
         ]);
         assert_eq!(
             block_on(resolver.resolve_a()).unwrap(),
             [v4("1.1.1.1"), v4("2.2.2.2")]
         );
+        assert!(block_on(resolver.resolve_aaaa()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn all_of_disjoint_is_empty() {
+        let resolver = CompositeResolver::all(vec![
+            fixed(Some(&["1.1.1.1"]), Some(&["2001:4860::1"])),
+            fixed(Some(&["2.2.2.2"]), Some(&["2001:4860::2"])),
+        ]);
+        assert!(block_on(resolver.resolve_a()).unwrap().is_empty());
         assert!(block_on(resolver.resolve_aaaa()).unwrap().is_empty());
     }
 
@@ -237,9 +266,10 @@ mod tests {
 
     #[test]
     fn nested() {
-        // local AND (echo OR echo), as the default
+        // local AND (echo OR echo), as the default: the local addresses the
+        // working echo service sees
         let resolver = CompositeResolver::all(vec![
-            fixed(Some(&[]), Some(&["2001:4860::1"])),
+            fixed(Some(&["1.1.1.1"]), Some(&["2001:4860::1", "2001:4860::2"])),
             Box::new(CompositeResolver::any(vec![
                 fixed(None, None),
                 fixed(Some(&["1.1.1.1"]), Some(&["2001:4860::2"])),
@@ -248,7 +278,7 @@ mod tests {
         assert_eq!(block_on(resolver.resolve_a()).unwrap(), [v4("1.1.1.1")]);
         assert_eq!(
             block_on(resolver.resolve_aaaa()).unwrap(),
-            [v6("2001:4860::1"), v6("2001:4860::2")]
+            [v6("2001:4860::2")]
         );
     }
 }

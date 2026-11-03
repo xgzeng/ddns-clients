@@ -64,11 +64,11 @@ pub enum ResolverConfig {
         /// Only this interface's addresses; all interfaces if unset.
         interface: Option<String>,
     },
-    /// Merges the addresses of all of `resolvers`; fails if any fails.
+    /// The addresses all of `resolvers` found; fails if any fails.
     All {
         resolvers: Vec<ResolverConfig>,
     },
-    /// Merges the addresses of `resolvers`, skipping failed ones.
+    /// The addresses any of `resolvers` found, skipping failed ones.
     Any {
         resolvers: Vec<ResolverConfig>,
     },

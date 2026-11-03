@@ -4,7 +4,7 @@
 #
 # The file holds credentials: ddnsd refuses it if group or others can read it.
 
-# The default resolvers: local addresses and those an echo service sees.
+# The default resolvers: the local addresses an echo service also sees.
 # resolvers = [
 #   { type = "all", resolvers = [
 #     { type = "local" },        # optionally interface = "wan"

@@ -71,8 +71,8 @@ fails keeps its last known addresses.
 | `ipify` | [ipify.org](https://www.ipify.org) |
 | `http` | Any service echoing the client's IP as plain text, see below |
 | `local` | Global addresses of local network interfaces, or only of `interface`, e.g. `interface = "eth0"`; Linux only |
-| `any` | The merged addresses of its `resolvers`, skipping failed ones, like the top-level list |
-| `all` | The merged addresses of its `resolvers`; fails if any of them fails |
+| `any` | The addresses any of its `resolvers` found, skipping failed ones, like the top-level list |
+| `all` | The addresses all of its `resolvers` found, in the order of the first; fails if any of them fails |
 
 `http` takes `url`, used for both families if its host has both A and AAAA
 records, and `ipv4_url` and `ipv6_url`, which override it for their family. At
@@ -87,8 +87,10 @@ resolvers = [
 ]
 ```
 
-`any` and `all` nest. The default publishes the local addresses together with
-those an echo service sees:
+`any` and `all` nest, separately for IPv4 and IPv6. The default publishes the
+local addresses that an echo service also sees, so a host behind NAT, or with a
+private or CGNAT address, publishes no IPv4 address, and of several IPv6
+addresses only the one it connects from:
 
 ```toml
 resolvers = [
@@ -99,16 +101,15 @@ resolvers = [
 ]
 ```
 
-With two uplinks, this publishes the addresses of both interfaces, or none if
-either can't be read, and otherwise what icanhazip sees:
+Behind a NAT router, publish what an echo service sees instead, e.g. with
+`resolvers = [{ type = "icanhazip" }, { type = "ipify" }]`. With two uplinks,
+this publishes the addresses of both interfaces, skipping one that can't be
+read:
 
 ```toml
 resolvers = [
-  { type = "all", resolvers = [
-    { type = "local", interface = "wan1" },
-    { type = "local", interface = "wan2" },
-  ] },
-  { type = "icanhazip" },
+  { type = "local", interface = "wan1" },
+  { type = "local", interface = "wan2" },
 ]
 ```
 

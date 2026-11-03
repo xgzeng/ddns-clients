@@ -17,7 +17,8 @@ Cloudflare and No-IP DNS providers, or PKARR records on the Mainline DHT.
 .PP
 Addresses are found with HTTP echo services (icanhazip, ipify or custom URLs)
 and from the global addresses of local network interfaces, or of one interface;
-the addresses of the configured resolvers are merged for each address family.
+the configured resolvers are combined for each address family, by default to
+the local addresses that an echo service also sees.
 They are looked up every
 .B resolve_interval
 seconds, and also at the next check after the global addresses of a local

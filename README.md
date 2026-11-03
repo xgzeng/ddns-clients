@@ -20,7 +20,8 @@ DNS providers:
 | [PKARR](https://pkdns.net) | records under an Ed25519 key, published on the Mainline DHT and PKARR relays and republished every `cache_expire`; the `pkarr` cargo feature, on by default |
 
 IP resolvers: HTTP echo services (icanhazip, ipify, or custom URLs) and local
-interfaces via netlink (Linux), whose addresses can be merged.
+interfaces via netlink (Linux), which can be combined, e.g. to the local
+addresses an echo service confirms.
 
 ## Installation
 
