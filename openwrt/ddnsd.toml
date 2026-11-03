@@ -1,0 +1,28 @@
+# ddnsd configuration; all settings are described in
+# /usr/share/ddnsd/ddnsd.example.toml. Uncomment and fill in a provider,
+# then run: /etc/init.d/ddnsd restart
+#
+# The file holds credentials: ddnsd refuses it if group or others can read it.
+
+# The default resolvers: local addresses and those an echo service sees.
+# resolvers = [
+#   { type = "all", resolvers = [
+#     { type = "local" },        # optionally interface = "wan"
+#     { type = "any", resolvers = [{ type = "icanhazip" }, { type = "ipify" }] },
+#   ] },
+# ]
+
+# [provider.cloudflare]
+# api_token = "..."            # needs Zone:Read and DNS:Edit
+# zone = "example.com"
+# domain = "home"              # home.example.com
+
+# [provider.noip]
+# username = "..."
+# password = "..."
+# domain = "myhost.ddns.net"
+
+# [provider.pkarr]
+# secret_file = "pkarr.key"    # /etc/pkarr.key, from:
+#                              # (umask 077; openssl rand -hex 32 > /etc/pkarr.key)
+# domain = "home"              # home.<public key>

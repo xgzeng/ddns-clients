@@ -21,9 +21,9 @@
 //!     .domain("myhost.example.com")
 //!     .ttl(Some(300))
 //!     .build()?;
-//! let resolvers = resolve::default_resolvers();
-//! let ipv4 = resolvers.resolve_a().await?;
-//! let ipv6 = resolvers.resolve_aaaa().await.unwrap_or_default(); // none without IPv6
+//! let resolver = resolve::default_resolvers();
+//! let ipv4 = resolver.resolve_a().await?;
+//! let ipv6 = resolver.resolve_aaaa().await.unwrap_or_default(); // none without IPv6
 //!
 //! // replace the domain's A/AAAA records with the resolved addresses
 //! let ips = ipv4.into_iter().map(IpAddr::from).chain(ipv6.into_iter().map(IpAddr::from));

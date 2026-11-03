@@ -9,8 +9,8 @@ PROG=/usr/sbin/ddnsd
 CONF=/etc/ddnsd.toml
 
 start_service() {
-	# start once the administrator has written the config, see
-	# /usr/share/ddnsd/ddnsd.example.toml
+	# the package installs a config without providers, which ddnsd refuses
+	# until one is filled in; see /usr/share/ddnsd/ddnsd.example.toml
 	if [ ! -f "$CONF" ]; then
 		echo "ddnsd: $CONF doesn't exist, not starting" >&2
 		return 1

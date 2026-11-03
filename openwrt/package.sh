@@ -32,7 +32,10 @@ root=$work/root
 install -D -m 755 "$binary" "$root/usr/sbin/ddnsd"
 install -D -m 755 "$src/openwrt/ddnsd.init" "$root/etc/init.d/ddnsd"
 install -D -m 644 "$src/crates/ddnsd/ddnsd.example.toml" "$root/usr/share/ddnsd/ddnsd.example.toml"
-# the config isn't packaged, so sysupgrade has to be told to keep it
+# a minimal config with every provider commented out, which ddnsd refuses
+# until one is filled in; apk keeps it on upgrade once edited
+install -D -m 600 "$src/openwrt/ddnsd.toml" "$root/etc/ddnsd.toml"
+# keep it across sysupgrade
 install -d "$root/lib/upgrade/keep.d"
 echo /etc/ddnsd.toml >"$root/lib/upgrade/keep.d/ddnsd"
 

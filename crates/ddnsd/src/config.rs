@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path, t
 use anyhow::{Context, Result, bail};
 use ddns_clients::{
     DynDnsClient,
-    resolve::{AnyResolver, HttpResolver},
+    resolve::{CompositeResolver, HttpResolver, IpResolver},
 };
 
 /// A `[provider.<name>]` entry: the provider parameters, passed on to
@@ -44,7 +44,8 @@ pub struct ProviderConfig {
     pub ttl: Option<u32>,
     pub max_records: Option<usize>,
     pub replace_only: Option<bool>,
-    pub cache_expire: Option<u64>,
+    #[serde(default, deserialize_with = "optional_seconds")]
+    pub cache_expire: Option<Duration>,
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
@@ -59,30 +60,50 @@ pub enum ResolverConfig {
         ipv6_url: Option<String>,
     },
     #[cfg(target_os = "linux")]
-    Local,
+    Local {
+        /// Only this interface's addresses; all interfaces if unset.
+        interface: Option<String>,
+    },
+    /// Merges the addresses of all of `resolvers`; fails if any fails.
+    All {
+        resolvers: Vec<ResolverConfig>,
+    },
+    /// Merges the addresses of `resolvers`, skipping failed ones.
+    Any {
+        resolvers: Vec<ResolverConfig>,
+    },
 }
 
-impl From<&ResolverConfig> for AnyResolver {
-    fn from(config: &ResolverConfig) -> Self {
-        match config {
-            ResolverConfig::Icanhazip => HttpResolver::icanhazip().into(),
-            ResolverConfig::Ipify => HttpResolver::ipify().into(),
+impl ResolverConfig {
+    fn resolver(&self) -> Box<dyn IpResolver> {
+        match self {
+            ResolverConfig::Icanhazip => Box::new(HttpResolver::icanhazip()),
+            ResolverConfig::Ipify => Box::new(HttpResolver::ipify()),
             ResolverConfig::Http {
                 url,
                 ipv4_url,
                 ipv6_url,
-            } => HttpResolver::new(
+            } => Box::new(HttpResolver::new(
                 ipv4_url.as_ref().or(url.as_ref()).cloned(),
                 ipv6_url.as_ref().or(url.as_ref()).cloned(),
-            )
-            .into(),
+            )),
             #[cfg(target_os = "linux")]
-            ResolverConfig::Local => ddns_clients::resolve::LocalResolver.into(),
+            ResolverConfig::Local { interface } => {
+                let resolver = ddns_clients::resolve::LocalResolver::default();
+                Box::new(match interface {
+                    Some(name) => resolver.interface(name),
+                    None => resolver,
+                })
+            }
+            ResolverConfig::All { resolvers } => Box::new(CompositeResolver::all(
+                resolvers.iter().map(Self::resolver).collect(),
+            )),
+            ResolverConfig::Any { resolvers } => Box::new(CompositeResolver::any(
+                resolvers.iter().map(Self::resolver).collect(),
+            )),
         }
     }
-}
 
-impl ResolverConfig {
     fn check(&self) -> Result<()> {
         if let ResolverConfig::Http {
             url: None,
@@ -91,6 +112,27 @@ impl ResolverConfig {
         } = self
         {
             bail!("http resolver: set url, or ipv4_url and/or ipv6_url");
+        }
+        #[cfg(target_os = "linux")]
+        if let ResolverConfig::Local {
+            interface: Some(name),
+        } = self
+        {
+            if name.is_empty() {
+                bail!("local resolver: interface must not be empty");
+            }
+        }
+        if let ResolverConfig::All { resolvers } | ResolverConfig::Any { resolvers } = self {
+            if resolvers.is_empty() {
+                let kind = match self {
+                    ResolverConfig::All { .. } => "all",
+                    _ => "any",
+                };
+                bail!("{kind} resolver: resolvers must not be empty");
+            }
+            for resolver in resolvers {
+                resolver.check()?;
+            }
         }
         Ok(())
     }
@@ -106,17 +148,18 @@ pub struct Config {
     /// Like `ipv4`, for IPv6.
     #[serde(default = "yes")]
     pub ipv6: bool,
-    /// Seconds between lookups of the public addresses.
-    #[serde(default = "default_resolve_interval")]
-    pub resolve_interval: u64,
-    /// Seconds between the daemon's checks, which retry failed updates and
-    /// look up the addresses once `resolve_interval` has passed.
-    #[serde(default = "default_tick")]
-    pub tick: u64,
-    /// Default for providers that don't set it: seconds after which they read
-    /// their records again, to notice changes made outside ddnsd; 0 never.
-    #[serde(default = "default_cache_expire")]
-    pub cache_expire: u64,
+    /// Time between lookups of the public addresses, configured in seconds.
+    #[serde(default = "default_resolve_interval", deserialize_with = "seconds")]
+    pub resolve_interval: Duration,
+    /// Time between the daemon's checks, which retry failed updates and look
+    /// up the addresses once `resolve_interval` has passed; in seconds.
+    #[serde(default = "default_tick", deserialize_with = "seconds")]
+    pub tick: Duration,
+    /// Default for providers that don't set it: time after which they read
+    /// their records again, to notice changes made outside ddnsd; in seconds,
+    /// 0 never.
+    #[serde(default = "default_cache_expire", deserialize_with = "seconds")]
+    pub cache_expire: Duration,
     /// Default for providers that don't set it; 0 means the provider's default.
     #[serde(default = "default_ttl")]
     pub ttl: u32,
@@ -127,7 +170,8 @@ pub struct Config {
     /// records, never create or delete any.
     #[serde(default)]
     pub replace_only: bool,
-    /// Tried in order, per address family.
+    /// Their addresses are merged, per address family; failed ones are
+    /// skipped.
     #[serde(default = "default_resolvers")]
     pub resolvers: Vec<ResolverConfig>,
     /// Providers to update, by name.
@@ -286,7 +330,7 @@ impl Config {
         check_private(path).context("config file")?;
 
         let mut config: Config = toml::from_str(&fs::read_to_string(path)?)?;
-        if config.tick == 0 {
+        if config.tick.is_zero() {
             bail!("tick must not be 0");
         }
         if config.resolvers.is_empty() {
@@ -406,12 +450,18 @@ impl Config {
     /// How often `provider` reads its records again; `None` (configured as 0)
     /// never.
     fn cache_expire(&self, provider: &ProviderConfig) -> Option<Duration> {
-        let secs = provider.cache_expire.unwrap_or(self.cache_expire);
-        (secs != 0).then(|| Duration::from_secs(secs))
+        let expire = provider.cache_expire.unwrap_or(self.cache_expire);
+        (!expire.is_zero()).then_some(expire)
     }
 
-    pub fn resolvers(&self) -> Vec<AnyResolver> {
-        self.resolvers.iter().map(AnyResolver::from).collect()
+    /// The `any` of `resolvers`.
+    pub fn resolver(&self) -> CompositeResolver {
+        CompositeResolver::any(
+            self.resolvers
+                .iter()
+                .map(ResolverConfig::resolver)
+                .collect(),
+        )
     }
 }
 
@@ -419,16 +469,28 @@ fn yes() -> bool {
     true
 }
 
-fn default_tick() -> u64 {
-    15
+fn default_tick() -> Duration {
+    Duration::from_secs(15)
 }
 
-fn default_resolve_interval() -> u64 {
-    300
+fn default_resolve_interval() -> Duration {
+    Duration::from_secs(300)
 }
 
-fn default_cache_expire() -> u64 {
-    3600
+/// Deserializes a [`Duration`] from whole seconds.
+fn seconds<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    <u64 as serde::Deserialize>::deserialize(deserializer).map(Duration::from_secs)
+}
+
+/// Like [`seconds`], for settings that may be unset.
+fn optional_seconds<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error> {
+    seconds(deserializer).map(Some)
+}
+
+fn default_cache_expire() -> Duration {
+    Duration::from_secs(3600)
 }
 
 fn default_ttl() -> u32 {
@@ -439,12 +501,18 @@ fn default_max_records() -> usize {
     2
 }
 
+/// Like [`ddns_clients::resolve::default_resolvers`]: local AND (icanhazip OR
+/// ipify).
 fn default_resolvers() -> Vec<ResolverConfig> {
-    vec![
-        ResolverConfig::Icanhazip,
-        #[cfg(target_os = "linux")]
-        ResolverConfig::Local,
-    ]
+    vec![ResolverConfig::All {
+        resolvers: vec![
+            #[cfg(target_os = "linux")]
+            ResolverConfig::Local { interface: None },
+            ResolverConfig::Any {
+                resolvers: vec![ResolverConfig::Icanhazip, ResolverConfig::Ipify],
+            },
+        ],
+    }]
 }
 
 #[cfg(test)]
@@ -509,8 +577,8 @@ cache_expire = 600
 "#,
         )
         .unwrap();
-        assert_eq!(config.resolve_interval, 60);
-        assert_eq!(config.tick, 5);
+        assert_eq!(config.resolve_interval, Duration::from_secs(60));
+        assert_eq!(config.tick, Duration::from_secs(5));
         assert_eq!(
             config.resolvers,
             vec![
@@ -548,8 +616,8 @@ cache_expire = 600
     #[test]
     fn defaults() {
         let config = load("defaults", MINIMAL).unwrap();
-        assert_eq!(config.resolve_interval, 300);
-        assert_eq!(config.tick, 15);
+        assert_eq!(config.resolve_interval, Duration::from_secs(300));
+        assert_eq!(config.tick, Duration::from_secs(15));
         assert_eq!(config.resolvers, default_resolvers());
 
         let targets = config.targets().unwrap();
@@ -575,6 +643,7 @@ cache_expire = 600
         let targets = config.targets().unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].client.domain(), "myhost.example.com");
+        assert_eq!(config.resolvers, default_resolvers());
     }
 
     #[test]
@@ -608,7 +677,7 @@ cache_expire = 600
                 ipv6_url: None,
             }]
         );
-        let debug = format!("{:?}", config.resolvers());
+        let debug = format!("{:?}", config.resolver());
         assert_eq!(
             debug.matches("https://ip.example.com").count(),
             2,
@@ -634,7 +703,7 @@ cache_expire = 600
                 &format!("resolvers = [{{ type = \"http\", {keys} }}]\n{MINIMAL}"),
             )
             .unwrap();
-            let debug = format!("{:?}", config.resolvers());
+            let debug = format!("{:?}", config.resolver());
             let v4 = debug.find(expected[0]).expect(&debug);
             let v6 = debug.rfind(expected[1]).expect(&debug);
             assert!(v4 < v6, "{debug}");
@@ -650,6 +719,57 @@ cache_expire = 600
         )
         .unwrap_err();
         assert!(err.to_string().contains("set url"), "{err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_resolver_interface() {
+        let config = load(
+            "iface",
+            &format!("resolvers = [{{ type = \"local\", interface = \"eth0\" }}]\n{MINIMAL}"),
+        )
+        .unwrap();
+        assert_eq!(
+            config.resolvers,
+            vec![ResolverConfig::Local {
+                interface: Some("eth0".into())
+            }]
+        );
+        let debug = format!("{:?}", config.resolver());
+        assert!(debug.contains("\"eth0\""), "{debug}");
+
+        let err = load(
+            "noiface",
+            &format!("resolvers = [{{ type = \"local\", interface = \"\" }}]\n{MINIMAL}"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("interface"), "{err}");
+    }
+
+    #[test]
+    fn nested_resolvers() {
+        let config = load(
+            "nested",
+            &format!(
+                "resolvers = [{{ type = \"all\", resolvers = [{{ type = \"icanhazip\" }}, {{ type = \"ipify\" }}] }}]\n{MINIMAL}"
+            ),
+        )
+        .unwrap();
+        let debug = format!("{:?}", config.resolver());
+        assert!(debug.contains("all: true"), "{debug}");
+        assert!(debug.contains("icanhazip.com"), "{debug}");
+        assert!(debug.contains("ipify.org"), "{debug}");
+
+        let err = load(
+            "nestedempty",
+            &format!("resolvers = [{{ type = \"any\", resolvers = [] }}]\n{MINIMAL}"),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("any resolver: resolvers must not be empty"),
+            "{err}"
+        );
     }
 
     fn cloudflare(zone: &str, domain: &str) -> String {

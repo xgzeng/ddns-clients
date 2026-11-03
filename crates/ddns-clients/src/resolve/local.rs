@@ -15,13 +15,26 @@ use super::IpResolver;
 /// Useful when the host has a public address directly, e.g. IPv6 or no NAT.
 /// Skips non-global and deprecated addresses. Must be used from within a
 /// Tokio runtime.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LocalResolver;
+///
+/// `LocalResolver::default()` reads all interfaces; [`interface`](Self::interface)
+/// limits it to one.
+#[derive(Debug, Clone, Default)]
+pub struct LocalResolver {
+    interface: Option<String>,
+}
+
+impl LocalResolver {
+    /// Only use the addresses of the interface `name`, e.g. `eth0`.
+    pub fn interface(mut self, name: impl Into<String>) -> Self {
+        self.interface = Some(name.into());
+        self
+    }
+}
 
 #[async_trait]
 impl IpResolver for LocalResolver {
     async fn resolve_a(&self) -> Result<Vec<Ipv4Addr>> {
-        let addrs = global_addrs(AddressFamily::Inet).await?;
+        let addrs = global_addrs(AddressFamily::Inet, self.interface.as_deref()).await?;
         Ok(addrs
             .into_iter()
             .filter_map(|addr| match addr {
@@ -32,7 +45,7 @@ impl IpResolver for LocalResolver {
     }
 
     async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>> {
-        let addrs = global_addrs(AddressFamily::Inet6).await?;
+        let addrs = global_addrs(AddressFamily::Inet6, self.interface.as_deref()).await?;
         Ok(addrs
             .into_iter()
             .filter_map(|addr| match addr {
@@ -44,13 +57,31 @@ impl IpResolver for LocalResolver {
 }
 
 /// The global, non-deprecated addresses of `wanted_family` on local
-/// interfaces.
-async fn global_addrs(wanted_family: AddressFamily) -> Result<Vec<IpAddr>> {
+/// interfaces, or only on `interface`.
+async fn global_addrs(
+    wanted_family: AddressFamily,
+    interface: Option<&str>,
+) -> Result<Vec<IpAddr>> {
     let (conn, handle, _) = rtnetlink::new_connection().context("open netlink socket")?;
     // Spawn the `Connection` so that it starts polling the netlink socket in the background.
     tokio::spawn(conn);
 
-    let mut stream = handle.address().get().execute();
+    let mut request = handle.address().get();
+    if let Some(name) = interface {
+        // looked up every time: e.g. a PPPoE interface gets a new index when it
+        // comes back up
+        let link = handle
+            .link()
+            .get()
+            .match_name(name)
+            .execute()
+            .try_next()
+            .await
+            .with_context(|| format!("interface {name}"))?
+            .with_context(|| format!("interface {name} not found"))?;
+        request = request.set_link_index_filter(link.header.index);
+    }
+    let mut stream = request.execute();
     let mut addrs = vec![];
 
     while let Some(addr_msg) = stream.try_next().await.context("netlink request failed")? {

@@ -16,8 +16,8 @@ A and AAAA records of one or more domains pointed at them, using the
 Cloudflare and No-IP DNS providers, or PKARR records on the Mainline DHT.
 .PP
 Addresses are found with HTTP echo services (icanhazip, ipify or custom URLs)
-or from the global addresses of local network interfaces, tried in the
-configured order for each address family.
+and from the global addresses of local network interfaces, or of one interface;
+the addresses of the configured resolvers are merged for each address family.
 .PP
 When a provider rejects an update in a way that needs the configuration to be
 fixed, such as invalid credentials, the daemon stops updating that provider

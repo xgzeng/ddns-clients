@@ -1,6 +1,7 @@
 mod config;
 
 use std::{
+    fmt::Debug,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::PathBuf,
     time::{Duration, Instant},
@@ -201,11 +202,11 @@ impl Daemon {
             .collect();
         Daemon::new(
             providers,
-            config.resolvers(),
+            config.resolver(),
             config.ipv4,
             config.ipv6,
-            Duration::from_secs(config.resolve_interval),
-            Duration::from_secs(config.tick),
+            config.resolve_interval,
+            config.tick,
         )
     }
 
@@ -278,45 +279,45 @@ impl Daemon {
     }
 
     /// Looks up the public addresses of the configured families, whatever
-    /// the providers' state, and logs it if they changed. The addresses are
-    /// kept sorted. A failed lookup or finding none keeps the previous ones,
-    /// as the lookup may just have failed.
+    /// the providers' state, and logs them if they changed. A failed lookup or
+    /// finding none keeps the previous ones, as the lookup may just have
+    /// failed.
     async fn resolve(&mut self) {
         self.resolved_at = Some(Instant::now());
-        // the first addresses found aren't a change
         let mut found = false;
         if self.ipv4 {
-            match self.resolver.resolve_a().await {
-                Ok(mut new) if !new.is_empty() => {
-                    new.sort();
-                    let known = &self.public_ipv4;
-                    if !known.is_empty() && *known != new {
-                        log::info!("public IPv4 address changed: {known:?} -> {new:?}");
-                    }
-                    self.public_ipv4 = new;
-                    found = true;
-                }
-                Ok(_) => {}
-                Err(err) => log::warn!("no IPv4 address resolved: {err:#}"),
-            }
+            let result = self.resolver.resolve_a().await;
+            found |= update_known("IPv4", &mut self.public_ipv4, result);
         }
         if self.ipv6 {
-            match self.resolver.resolve_aaaa().await {
-                Ok(mut new) if !new.is_empty() => {
-                    new.sort();
-                    let known = &self.public_ipv6;
-                    if !known.is_empty() && *known != new {
-                        log::info!("public IPv6 address changed: {known:?} -> {new:?}");
-                    }
-                    self.public_ipv6 = new;
-                    found = true;
-                }
-                Ok(_) => {}
-                Err(err) => log::warn!("no IPv6 address resolved: {err:#}"),
-            }
+            let result = self.resolver.resolve_aaaa().await;
+            found |= update_known("IPv6", &mut self.public_ipv6, result);
         }
         if !found {
             log::warn!("no public ip address found");
+        }
+    }
+}
+
+/// Replaces the `known` addresses of `family` ("IPv4" or "IPv6") with the
+/// sorted result of a lookup, logging them if they changed; keeps them if the
+/// lookup failed or found none. Returns whether it found any.
+fn update_known<T: Ord + Debug>(family: &str, known: &mut Vec<T>, result: Result<Vec<T>>) -> bool {
+    match result {
+        Ok(mut new) if !new.is_empty() => {
+            new.sort();
+            if known.is_empty() {
+                log::info!("public {family} address: {new:?}");
+            } else if *known != new {
+                log::info!("public {family} address changed: {known:?} -> {new:?}");
+            }
+            *known = new;
+            true
+        }
+        Ok(_) => false,
+        Err(err) => {
+            log::warn!("no {family} address resolved: {err:#}");
+            false
         }
     }
 }
@@ -358,6 +359,7 @@ mod tests {
         })
     }
 
+    #[derive(Debug)]
     struct Fixed;
 
     #[async_trait]
@@ -373,6 +375,7 @@ mod tests {
 
     /// Answers IPv4 lookups with the shared addresses, or fails on `None`;
     /// finds no IPv6 address.
+    #[derive(Debug)]
     struct Scripted(Arc<Mutex<Option<Vec<Ipv4Addr>>>>);
 
     #[async_trait]

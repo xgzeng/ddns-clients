@@ -20,7 +20,7 @@ DNS providers:
 | [PKARR](https://pkdns.net) | records under an Ed25519 key, published on the Mainline DHT and PKARR relays and republished every `cache_expire`; the `pkarr` cargo feature, on by default |
 
 IP resolvers: HTTP echo services (icanhazip, ipify, or custom URLs) and local
-interfaces via netlink (Linux).
+interfaces via netlink (Linux), whose addresses can be merged.
 
 ## Installation
 
@@ -46,19 +46,19 @@ sudoedit /etc/ddnsd.toml
 sudo systemctl start ddnsd
 ```
 
-The OpenWrt package installs `/usr/sbin/ddnsd`, an enabled `ddnsd` procd service
-and an example config, and takes 8-10 MiB of storage before the filesystem's
-compression. It installs where `cat /etc/apk/arch` lists `aarch64_generic`; it
-isn't signed, so `apk` needs `--allow-untrusted`. As on Debian, the service starts once
-`/etc/ddnsd.toml` exists. `sysupgrade` keeps the config, and the logs are in
-`logread -e ddnsd`.
+The OpenWrt package installs `/usr/sbin/ddnsd`, an enabled `ddnsd` procd service,
+a minimal `/etc/ddnsd.toml` and a full example config, and takes 8-10 MiB of
+storage before the filesystem's compression. It installs where
+`cat /etc/apk/arch` lists `aarch64_generic`; it isn't signed, so `apk` needs
+`--allow-untrusted`. The installed `/etc/ddnsd.toml` has every provider
+commented out, so the service doesn't run until one is filled in. Upgrades keep
+the edited config, leaving the packaged one as `/etc/ddnsd.toml.apk-new`, and so
+does `sysupgrade`. The logs are in `logread -e ddnsd`.
 
 ```sh
 apk add --allow-untrusted ./ddnsd-<version>-r1_aarch64_generic.apk
-cp /usr/share/ddnsd/ddnsd.example.toml /etc/ddnsd.toml
-chmod 600 /etc/ddnsd.toml
-vi /etc/ddnsd.toml
-/etc/init.d/ddnsd start
+vi /etc/ddnsd.toml                 # uncomment and fill in a provider
+/etc/init.d/ddnsd restart
 ```
 
 To build from source, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
@@ -70,9 +70,9 @@ To build from source, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 ```rust
 use ddns_clients::{IpResolver, resolve};
 
-let resolvers = resolve::default_resolvers();  // icanhazip, then local interfaces
-let ipv4 = resolvers.resolve_a().await?;       // Vec<Ipv4Addr>
-let ipv6 = resolvers.resolve_aaaa().await.unwrap_or_default(); // none without IPv6
+let resolver = resolve::default_resolvers();   // local addresses and icanhazip/ipify
+let ipv4 = resolver.resolve_a().await?;        // Vec<Ipv4Addr>
+let ipv6 = resolver.resolve_aaaa().await.unwrap_or_default(); // none without IPv6
 ```
 
 ### Updating DNS records

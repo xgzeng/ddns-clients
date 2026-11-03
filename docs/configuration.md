@@ -23,8 +23,10 @@ records, run `ddnsd dry-run`.
 resolve_interval = 300
 ttl = 600
 resolvers = [
-  { type = "icanhazip" },
-  { type = "local" },
+  { type = "all", resolvers = [
+    { type = "local" },
+    { type = "any", resolvers = [{ type = "icanhazip" }, { type = "ipify" }] },
+  ] },
 ]
 
 [provider.home]
@@ -49,24 +51,27 @@ otherwise read them as part of that table.
 |---|---|---|
 | `tick` | `15` | Seconds between the daemon's checks. Each check looks up the public addresses once `resolve_interval` has passed, and updates the providers whose addresses changed or whose last update failed, unless the provider asked to wait; must not be `0` |
 | `resolve_interval` | `300` | Seconds between lookups of the public addresses, which happen at the first check after it |
-| `resolvers` | icanhazip, then local | How to find the public addresses, see [Resolvers](#resolvers); must not be empty |
+| `resolvers` | local and (icanhazip or ipify) | How to find the public addresses, see [Resolvers](#resolvers); must not be empty |
 | `ipv4`, `ipv6` | `true` | Which public addresses are looked up, and defaults for all providers; a provider can't enable a family disabled here |
 | `ttl`, `max_records`, `replace_only`, `cache_expire` | | Defaults for all providers, see [Record settings](#record-settings) |
 
 ## Resolvers
 
-`resolvers` is a list of the ways to find this host's public addresses. They are
-tried in order, separately for IPv4 and IPv6, until one finds an address. The
-addresses are resolved every `resolve_interval`, at the next `tick`, and pushed
-to all providers. A family whose lookup finds nothing keeps its last known
-addresses.
+`resolvers` is a list of the ways to find this host's public addresses. All of
+them are asked, separately for IPv4 and IPv6, and the addresses they find are
+merged, without duplicates. A failed one is skipped, and the lookup fails only if
+all of them failed. The addresses are resolved every `resolve_interval`, at the
+next `tick`, and pushed to all providers. A family whose lookup finds nothing or
+fails keeps its last known addresses.
 
 | `type` | |
 |---|---|
 | `icanhazip` | [icanhazip.com](https://icanhazip.com) |
 | `ipify` | [ipify.org](https://www.ipify.org) |
 | `http` | Any service echoing the client's IP as plain text, see below |
-| `local` | Global addresses of local network interfaces; Linux only |
+| `local` | Global addresses of local network interfaces, or only of `interface`, e.g. `interface = "eth0"`; Linux only |
+| `any` | The merged addresses of its `resolvers`, skipping failed ones, like the top-level list |
+| `all` | The merged addresses of its `resolvers`; fails if any of them fails |
 
 `http` takes `url`, used for both families if its host has both A and AAAA
 records, and `ipv4_url` and `ipv6_url`, which override it for their family. At
@@ -78,6 +83,31 @@ resolvers = [
   { type = "http", ipv4_url = "https://ipv4.example.net", ipv6_url = "https://ipv6.example.net" },
   { type = "http", url = "https://ip.example.net", ipv6_url = "https://ipv6.example.net" },
   { type = "http", ipv4_url = "https://ipv4.example.net" },
+]
+```
+
+`any` and `all` nest. The default publishes the local addresses together with
+those an echo service sees:
+
+```toml
+resolvers = [
+  { type = "all", resolvers = [
+    { type = "local" },
+    { type = "any", resolvers = [{ type = "icanhazip" }, { type = "ipify" }] },
+  ] },
+]
+```
+
+With two uplinks, this publishes the addresses of both interfaces, or none if
+either can't be read, and otherwise what icanhazip sees:
+
+```toml
+resolvers = [
+  { type = "all", resolvers = [
+    { type = "local", interface = "wan1" },
+    { type = "local", interface = "wan2" },
+  ] },
+  { type = "icanhazip" },
 ]
 ```
 
