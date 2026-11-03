@@ -9,6 +9,8 @@ use crate::{
     CloudflareProvider, DynDnsProvider, NoIpProvider,
     providers::{CLOUDFLARE, NOIP},
 };
+#[cfg(feature = "pkarr")]
+use crate::{PkarrProvider, providers::PKARR};
 
 /// A dynamic DNS client managing the address records of one domain on one
 /// provider.
@@ -59,7 +61,12 @@ impl DynDnsClient {
         let kind = match name {
             CLOUDFLARE => Kind::Cloudflare,
             NOIP => Kind::NoIp,
-            _ => bail!("unknown provider {name:?}, expected one of: {CLOUDFLARE}, {NOIP}"),
+            #[cfg(feature = "pkarr")]
+            PKARR => Kind::Pkarr,
+            _ => bail!(
+                "unknown provider {name:?}, expected one of: {}",
+                Kind::ALL.map(|kind| kind.name()).join(", ")
+            ),
         };
         Ok(DynDnsClientBuilder::new(kind))
     }
@@ -287,16 +294,28 @@ impl fmt::Debug for DynDnsClient {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Kind {
     Cloudflare,
     NoIp,
+    #[cfg(feature = "pkarr")]
+    Pkarr,
 }
 
 impl Kind {
-    fn name(&self) -> &str {
+    const ALL: [Kind; if cfg!(feature = "pkarr") { 3 } else { 2 }] = [
+        Kind::Cloudflare,
+        Kind::NoIp,
+        #[cfg(feature = "pkarr")]
+        Kind::Pkarr,
+    ];
+
+    fn name(&self) -> &'static str {
         match self {
             Kind::Cloudflare => CLOUDFLARE,
             Kind::NoIp => NOIP,
+            #[cfg(feature = "pkarr")]
+            Kind::Pkarr => PKARR,
         }
     }
 
@@ -305,6 +324,8 @@ impl Kind {
         match self {
             Kind::Cloudflare => (&["api_token", "zone", "domain"], &[]),
             Kind::NoIp => (&["username", "password", "domain"], &["user_agent"]),
+            #[cfg(feature = "pkarr")]
+            Kind::Pkarr => (&["secret_key"], &["domain", "relays", "keep_other_records"]),
         }
     }
 }
@@ -315,6 +336,7 @@ impl Kind {
 /// |---|---|---|
 /// | `cloudflare` | `api_token`, `zone`, `domain` | `ttl`, `enable_ipv4`, `enable_ipv6`, `max_records`, `replace_only` |
 /// | `noip` | `username`, `password`, `domain` | `user_agent`, `ttl`, `enable_ipv4`, `enable_ipv6`, `max_records`, `replace_only` |
+/// | `pkarr` | `secret_key` | `domain`, `relays`, `keep_other_records`, `ttl`, `enable_ipv4`, `enable_ipv6`, `max_records`, `replace_only` |
 ///
 /// [`build`](Self::build) rejects missing (or empty) required parameters,
 /// parameters the provider doesn't use, and disabling both families.
@@ -326,6 +348,12 @@ pub struct DynDnsClientBuilder {
     username: Option<String>,
     password: Option<String>,
     user_agent: Option<String>,
+    #[cfg(feature = "pkarr")]
+    secret_key: Option<String>,
+    #[cfg(feature = "pkarr")]
+    relays: Option<Vec<String>>,
+    #[cfg(feature = "pkarr")]
+    keep_other_records: Option<bool>,
     domain: Option<String>,
     ttl: Option<u32>,
     ipv4: bool,
@@ -343,6 +371,12 @@ impl DynDnsClientBuilder {
             username: None,
             password: None,
             user_agent: None,
+            #[cfg(feature = "pkarr")]
+            secret_key: None,
+            #[cfg(feature = "pkarr")]
+            relays: None,
+            #[cfg(feature = "pkarr")]
+            keep_other_records: None,
             domain: None,
             ttl: None,
             ipv4: true,
@@ -382,7 +416,31 @@ impl DynDnsClientBuilder {
         self
     }
 
-    /// The domain whose records the client manages.
+    /// PKARR secret key, 64 hex digits; see [`PkarrProvider::new`].
+    #[cfg(feature = "pkarr")]
+    pub fn secret_key(mut self, secret_key: impl Into<String>) -> Self {
+        self.secret_key = Some(secret_key.into());
+        self
+    }
+
+    /// PKARR relay URLs; an empty list only uses the DHT. Without this, the
+    /// default relays are used.
+    #[cfg(feature = "pkarr")]
+    pub fn relays(mut self, relays: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.relays = Some(relays.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Whether PKARR keeps the other records of the key's packet (default
+    /// `true`); see [`PkarrProvider::keep_other_records`].
+    #[cfg(feature = "pkarr")]
+    pub fn keep_other_records(mut self, keep: bool) -> Self {
+        self.keep_other_records = Some(keep);
+        self
+    }
+
+    /// The domain whose records the client manages. For PKARR, the name
+    /// below the key, which is the key itself if empty or unset.
     pub fn domain(mut self, domain: impl Into<String>) -> Self {
         self.domain = Some(domain.into());
         self
@@ -429,7 +487,7 @@ impl DynDnsClientBuilder {
 
     /// Checks the parameters and creates the client.
     ///
-    /// Makes no network requests.
+    /// Makes no network requests, except that PKARR starts joining the DHT.
     pub fn build(self) -> Result<DynDnsClient> {
         self.check()?;
         let domain = self.domain.unwrap_or_default();
@@ -449,6 +507,15 @@ impl DynDnsClientBuilder {
                     None => NoIpProvider::new(username, password, domain)?,
                 })
             }
+            #[cfg(feature = "pkarr")]
+            Kind::Pkarr => Box::new(
+                PkarrProvider::new(
+                    self.secret_key.as_deref().unwrap_or_default(),
+                    &domain,
+                    self.relays.as_deref(),
+                )?
+                .keep_other_records(self.keep_other_records.unwrap_or(true)),
+            ),
         };
         Ok(DynDnsClient {
             provider,
@@ -462,20 +529,26 @@ impl DynDnsClientBuilder {
     }
 
     fn check(&self) -> Result<()> {
+        // whether each parameter is set, and if so, not empty
+        let string = |value: &Option<String>| value.as_ref().map(|value| !value.is_empty());
         let parameters = [
-            ("api_token", &self.api_token),
-            ("zone", &self.zone),
-            ("username", &self.username),
-            ("password", &self.password),
-            ("user_agent", &self.user_agent),
-            ("domain", &self.domain),
+            ("api_token", string(&self.api_token)),
+            ("zone", string(&self.zone)),
+            ("username", string(&self.username)),
+            ("password", string(&self.password)),
+            ("user_agent", string(&self.user_agent)),
+            #[cfg(feature = "pkarr")]
+            ("secret_key", string(&self.secret_key)),
+            #[cfg(feature = "pkarr")]
+            ("relays", self.relays.as_ref().map(|_| true)),
+            #[cfg(feature = "pkarr")]
+            ("keep_other_records", self.keep_other_records.map(|_| true)),
+            ("domain", string(&self.domain)),
         ];
         let (required, optional) = self.kind.parameters();
         let missing: Vec<&str> = parameters
             .iter()
-            .filter(|(name, value)| {
-                required.contains(name) && value.as_deref().is_none_or(str::is_empty)
-            })
+            .filter(|(name, value)| required.contains(name) && *value != Some(true))
             .map(|(name, _)| *name)
             .collect();
         let unused: Vec<&str> = parameters
@@ -628,10 +701,12 @@ mod tests {
     #[test]
     fn unknown_provider() {
         let err = DynDnsClient::provider("nope").unwrap_err();
-        assert_eq!(
-            err.to_string(),
+        let expected = if cfg!(feature = "pkarr") {
+            r#"unknown provider "nope", expected one of: cloudflare, noip, pkarr"#
+        } else {
             r#"unknown provider "nope", expected one of: cloudflare, noip"#
-        );
+        };
+        assert_eq!(err.to_string(), expected);
     }
 
     #[test]

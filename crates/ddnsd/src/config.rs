@@ -22,8 +22,22 @@ pub struct ProviderConfig {
     pub password: Option<String>,
     /// No-IP asks for `Company NameOfProgram/Version maintainer-contact@example.com`.
     pub user_agent: Option<String>,
+    /// PKARR secret key, 64 hex digits.
+    #[cfg(feature = "pkarr")]
+    pub secret_key: Option<String>,
+    /// File holding `secret_key`, relative to the config file's directory;
+    /// read by [`Config::load`] into `secret_key`.
+    #[cfg(feature = "pkarr")]
+    pub secret_file: Option<std::path::PathBuf>,
+    /// PKARR relay URLs; empty for the DHT only, unset for the default relays.
+    #[cfg(feature = "pkarr")]
+    pub relays: Option<Vec<String>>,
+    /// Whether PKARR keeps the key's other records.
+    #[cfg(feature = "pkarr")]
+    pub keep_other_records: Option<bool>,
     /// With `zone`, `<domain>.<zone>` unless it already ends with the zone, and
-    /// the zone itself if empty; defaults to `<hostname>.<zone>`.
+    /// the zone itself if empty; defaults to `<hostname>.<zone>`. For PKARR,
+    /// the name below the key, which is the key itself if empty or unset.
     pub domain: Option<String>,
     pub ipv4: Option<bool>,
     pub ipv6: Option<bool>,
@@ -122,8 +136,56 @@ pub struct Config {
 }
 
 impl ProviderConfig {
-    /// Checks `zone` and `domain`, and returns the full name of the domain.
-    fn full_domain(&self, name: &str) -> Result<String> {
+    /// The provider type: `type`, or else the entry's `name`.
+    fn kind<'a>(&'a self, name: &'a str) -> &'a str {
+        self.kind.as_deref().unwrap_or(name)
+    }
+
+    /// Whether this is a PKARR provider; built without PKARR, the type is
+    /// rejected as unknown later.
+    fn is_pkarr(&self, name: &str) -> bool {
+        self.kind(name) == "pkarr"
+    }
+
+    /// Reads `secret_file`, relative to `base`, into `secret_key`.
+    #[cfg(feature = "pkarr")]
+    fn read_secret_file(&mut self, name: &str, base: &Path) -> Result<()> {
+        let Some(file) = &self.secret_file else {
+            return Ok(());
+        };
+        if !self.is_pkarr(name) {
+            bail!("secret_file is not used");
+        }
+        if self.secret_key.is_some() {
+            bail!("set secret_key or secret_file, not both");
+        }
+        let path = base.join(file);
+        check_private(&path).context("secret_file")?;
+        let key = fs::read_to_string(&path)
+            .with_context(|| format!("reading secret_file {}", path.display()))?;
+        self.secret_key = Some(key.trim().to_string());
+        Ok(())
+    }
+
+    /// Checks `zone` and `domain`, and returns the full name of the domain;
+    /// `None` for a PKARR key's own records.
+    fn full_domain(&self, name: &str) -> Result<Option<String>> {
+        if self.is_pkarr(name) {
+            // relative to the key, which the provider appends
+            return match self.domain.as_deref() {
+                None | Some("" | "@") => Ok(None),
+                Some(domain) => {
+                    check_domain_name(domain, true)
+                        .with_context(|| format!("invalid domain {domain:?}"))?;
+                    Ok(Some(domain.to_string()))
+                }
+            };
+        }
+        self.dns_domain(name).map(Some)
+    }
+
+    /// [`full_domain`](Self::full_domain) of a provider of DNS names.
+    fn dns_domain(&self, name: &str) -> Result<String> {
         let Some(zone) = &self.zone else {
             let Some(domain) = &self.domain else {
                 bail!("domain must be set for this provider");
@@ -157,6 +219,19 @@ impl ProviderConfig {
         check_domain_name(&full, true).with_context(|| format!("invalid domain {full:?}"))?;
         Ok(full)
     }
+}
+
+/// Fails if the file at `path`, which holds credentials, is missing or readable
+/// by group or others.
+fn check_private(path: &Path) -> Result<()> {
+    let mode = fs::metadata(path)
+        .with_context(|| path.display().to_string())?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        bail!("{} is readable by others", path.display());
+    }
+    Ok(())
 }
 
 /// Whether `domain` is `zone` or below it; both must be valid names.
@@ -204,12 +279,11 @@ pub struct Target {
 }
 
 impl Config {
+    /// Reads the config file at `path`; relative paths in it are relative to
+    /// its directory.
     pub fn load(path: impl AsRef<Path>) -> Result<Config> {
-        // check config file permission, should not been readable by other user
-        let mode = fs::metadata(&path)?.permissions().mode();
-        if mode & 0o077 != 0 {
-            bail!("config file is readable by others");
-        }
+        let path = path.as_ref();
+        check_private(path).context("config file")?;
 
         let mut config: Config = toml::from_str(&fs::read_to_string(path)?)?;
         if config.tick == 0 {
@@ -224,11 +298,17 @@ impl Config {
         if config.provider.is_empty() {
             bail!("no provider configured, add a [provider.<name>] table");
         }
+        #[cfg(feature = "pkarr")]
+        let base = path.parent().unwrap_or(Path::new(""));
         for (name, provider) in &mut config.provider {
             let domain = provider
                 .full_domain(name)
                 .map_err(|err| anyhow::anyhow!("provider {name}: {err:#}"))?;
-            provider.domain = Some(domain);
+            provider.domain = domain;
+            #[cfg(feature = "pkarr")]
+            provider
+                .read_secret_file(name, base)
+                .map_err(|err| anyhow::anyhow!("provider {name}: {err:#}"))?;
         }
         Ok(config)
     }
@@ -240,21 +320,28 @@ impl Config {
         self.provider
             .iter()
             .map(|(name, provider)| {
+                let cache_expire = self.cache_expire(provider);
                 let client = self
                     .check_families(provider)
-                    .and_then(|()| self.client(name, provider))
+                    .and_then(|()| {
+                        if provider.is_pkarr(name) && cache_expire.is_none() {
+                            // the packet is republished when the cache expires
+                            bail!("cache_expire must not be 0, or the records drop off the DHT");
+                        }
+                        self.client(name, provider)
+                    })
                     .with_context(|| format!("provider {name}"))?;
                 Ok(Target {
                     name: name.clone(),
                     client,
-                    cache_expire: self.cache_expire(provider),
+                    cache_expire,
                 })
             })
             .collect()
     }
 
     fn client(&self, name: &str, provider: &ProviderConfig) -> Result<DynDnsClient> {
-        let mut builder = DynDnsClient::provider(provider.kind.as_deref().unwrap_or(name))?;
+        let mut builder = DynDnsClient::provider(provider.kind(name))?;
         if let Some(api_token) = &provider.api_token {
             builder = builder.api_token(api_token);
         }
@@ -269,6 +356,18 @@ impl Config {
         }
         if let Some(user_agent) = &provider.user_agent {
             builder = builder.user_agent(user_agent);
+        }
+        #[cfg(feature = "pkarr")]
+        {
+            if let Some(secret_key) = &provider.secret_key {
+                builder = builder.secret_key(secret_key);
+            }
+            if let Some(relays) = &provider.relays {
+                builder = builder.relays(relays);
+            }
+            if let Some(keep) = provider.keep_other_records {
+                builder = builder.keep_other_records(keep);
+            }
         }
         if let Some(domain) = &provider.domain {
             builder = builder.domain(domain);
@@ -483,7 +582,7 @@ cache_expire = 600
         let path = write_config("perm", MINIMAL, 0o644);
         let err = Config::load(&path).unwrap_err();
         fs::remove_file(path).unwrap();
-        assert!(err.to_string().contains("readable by others"));
+        assert!(format!("{err:#}").contains("readable by others"), "{err:#}");
     }
 
     #[test]
@@ -720,9 +819,11 @@ cache_expire = 600
         )
         .unwrap();
         let err = config.targets().err().unwrap();
-        assert_eq!(
-            format!("{err:#}"),
-            r#"provider nope: unknown provider "nope", expected one of: cloudflare, noip"#
+        assert!(
+            format!("{err:#}").starts_with(
+                r#"provider nope: unknown provider "nope", expected one of: cloudflare, noip"#
+            ),
+            "{err:#}"
         );
     }
 
@@ -744,5 +845,139 @@ username = "me"
                 .contains("provider home: cloudflare: missing api_token; username is not used"),
             "{err:#}"
         );
+    }
+
+    #[cfg(feature = "pkarr")]
+    const PKARR_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[cfg(feature = "pkarr")]
+    #[test]
+    fn pkarr_names_are_below_the_key() {
+        let config = load(
+            "pkarr",
+            &format!(
+                r#"
+[provider.pkarr]
+secret_key = "{PKARR_KEY}"
+relays = []
+
+[provider.home]
+type = "pkarr"
+secret_key = "{PKARR_KEY}"
+relays = ["https://relay.example.net"]
+keep_other_records = false
+domain = "home"
+"#
+            ),
+        )
+        .unwrap();
+        let targets = config.targets().unwrap();
+        let key = targets[1].client.domain();
+        assert_eq!(targets[1].name, "pkarr");
+        assert_eq!(key.len(), 52, "{key}");
+        assert_eq!(targets[0].client.domain(), format!("home.{key}"));
+    }
+
+    #[cfg(feature = "pkarr")]
+    #[test]
+    fn pkarr_secret_file() {
+        let dir = std::env::temp_dir().join(format!("ddnsd-test-{}-secret", std::process::id()));
+        fs::create_dir_all(dir.join("keys")).unwrap();
+        let key_file = dir.join("keys/pkarr.key");
+        fs::write(&key_file, format!("{PKARR_KEY}\n")).unwrap();
+        fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600)).unwrap();
+        let config_file = dir.join("ddnsd.toml");
+        let load_with = |settings: &str| {
+            fs::write(&config_file, format!("[provider.pkarr]\n{settings}\n")).unwrap();
+            fs::set_permissions(&config_file, fs::Permissions::from_mode(0o600)).unwrap();
+            Config::load(&config_file)
+        };
+
+        // relative to the config file's directory, and absolute
+        for file in ["keys/pkarr.key", key_file.to_str().unwrap()] {
+            let config = load_with(&format!("secret_file = {file:?}")).unwrap();
+            assert_eq!(
+                config.provider["pkarr"].secret_key.as_deref(),
+                Some(PKARR_KEY)
+            );
+            config.targets().unwrap();
+        }
+
+        let both = format!("secret_file = \"keys/pkarr.key\"\nsecret_key = \"{PKARR_KEY}\"");
+        let err = load_with(&both).unwrap_err();
+        assert!(format!("{err:#}").contains("not both"), "{err:#}");
+
+        let err = load_with("secret_file = \"missing.key\"").unwrap_err();
+        assert!(format!("{err:#}").contains("missing.key"), "{err:#}");
+
+        fs::set_permissions(&key_file, fs::Permissions::from_mode(0o644)).unwrap();
+        let err = load_with("secret_file = \"keys/pkarr.key\"").unwrap_err();
+        assert!(format!("{err:#}").contains("readable by others"), "{err:#}");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "pkarr")]
+    #[test]
+    fn rejects_secret_file_of_other_providers() {
+        let err = load(
+            "secret-other",
+            &format!("{MINIMAL}secret_file = \"pkarr.key\"\n"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("provider cloudflare: secret_file is not used"),
+            "{err:#}"
+        );
+    }
+
+    #[cfg(feature = "pkarr")]
+    #[test]
+    fn pkarr_rejects_never_expiring_cache() {
+        let config = load(
+            "pkarr-expire",
+            &format!(
+                r#"
+[provider.pkarr]
+secret_key = "{PKARR_KEY}"
+cache_expire = 0
+"#
+            ),
+        )
+        .unwrap();
+        let err = config.targets().err().unwrap();
+        assert!(
+            format!("{err:#}").contains("provider pkarr: cache_expire must not be 0"),
+            "{err:#}"
+        );
+    }
+
+    #[cfg(feature = "pkarr")]
+    #[test]
+    fn pkarr_rejects_bad_secret_key() {
+        let config = load(
+            "pkarr-key",
+            r#"
+[provider.pkarr]
+secret_key = "abc"
+zone = "example.com"
+"#,
+        )
+        .unwrap();
+        let err = config.targets().err().unwrap();
+        assert!(
+            format!("{err:#}").contains("pkarr: zone is not used"),
+            "{err:#}"
+        );
+        let config = load(
+            "pkarr-key2",
+            r#"
+[provider.pkarr]
+secret_key = "abc"
+"#,
+        )
+        .unwrap();
+        let err = config.targets().err().unwrap();
+        assert!(format!("{err:#}").contains("64 hex digits"), "{err:#}");
     }
 }

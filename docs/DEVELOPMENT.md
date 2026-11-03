@@ -28,6 +28,7 @@ builds the package with trixie's toolchain and fails if a newer one is needed.
 
 ```sh
 cargo test --workspace
+cargo test --workspace --no-default-features   # without the pkarr feature
 ```
 
 The tests in `crates/ddns-clients/tests/live.rs` talk to the real provider
@@ -43,6 +44,7 @@ missing (set them e.g. in an untracked `mise.local.toml` `[env]` section):
 | No-IP | `DDNS_NOIP_USERNAME` | account username |
 | | `DDNS_NOIP_PASSWORD` | account password |
 | | `DDNS_NOIP_HOSTNAME` | existing hostname with exactly one A record, e.g. `myhost.ddns.net` |
+| PKARR | | none: publishes test addresses under a fresh random key |
 
 ```sh
 mise run test-live

@@ -135,6 +135,40 @@ password = "..."
 domain = "myhost.ddns.net"
 ```
 
+### PKARR
+
+[PKARR](https://pkdns.net) (Public-Key Addressable Resource Records) publishes
+DNS records signed with an Ed25519 key on the Mainline DHT and on PKARR relays.
+The key's z-base32 public key is the domain, e.g.
+`yg4gxe7z1r7mr6orids9fh95y7gxhdsxjqi6nngsxxtakqaxr5no`, and can be resolved
+by PKARR-aware resolvers such as [pkdns](https://github.com/pubky/pkdns).
+Packages built with `--no-default-features` leave PKARR out.
+
+| Setting | |
+|---|---|
+| `type` | `pkarr` |
+| `secret_key` | The key's secret, 64 hex digits, e.g. from `openssl rand -hex 32`; this or `secret_file` is required |
+| `secret_file` | A file holding `secret_key`, as PKARR's key files do; a relative path is relative to the config file's directory. Like the config file, it must not be readable by group or others. The Debian service can't read files under `/home` |
+| `domain` | The name below the key, e.g. `home` for `home.<public key>`; default the key itself, as do `""` and `@` |
+| `relays` | PKARR relay URLs to publish to and read from besides the DHT; `[]` uses only the DHT; default pkarr's relays (`https://pkarr.pubky.app`, `https://pkarr.pubky.org`) |
+| `keep_other_records` | Keep the key's other records, of other names or types, when publishing; if `false`, they are removed; default `true` |
+
+All records of a key are one signed packet, which every change publishes again
+in full. The DHT drops packets after a few hours, so every `cache_expire`
+(default an hour) the packet is read and published again, re-signed; it can't
+be `0`. The public key, and with it the domain, is in the logs, e.g. of
+`ddnsd dry-run`.
+
+```toml
+[provider.pkarr]
+secret_file = "pkarr.key"   # /etc/pkarr.key, next to /etc/ddnsd.toml
+domain = "home"
+```
+
+```sh
+(umask 077; openssl rand -hex 32 > /etc/pkarr.key)
+```
+
 ### Domain names
 
 `domain` and `zone` are checked at startup and must be only a DNS name, without a
@@ -153,4 +187,4 @@ Set at the top of the file they are defaults for all providers, and set in a
 | `ttl` | `600` | TTL of created and changed records, in seconds; `0` uses the provider's default |
 | `max_records` | `2` | Maximum number of A and AAAA records kept for the domain; if more addresses are found, those that already have a record are kept first, and the rest aren't added |
 | `replace_only` | `false` | Only re-point existing records, never create or delete any, e.g. for records set up by hand |
-| `cache_expire` | `3600` | Seconds after which the records are read again from the provider, warning about changes made elsewhere; `0` never does |
+| `cache_expire` | `3600` | Seconds after which the records are read again from the provider, warning about changes made elsewhere; `0` never does. PKARR also publishes its records again then, and doesn't allow `0` |

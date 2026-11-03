@@ -23,6 +23,10 @@ jobs:
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
+      - name: Without the pkarr feature
+        run: |
+          cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+          cargo test --workspace --locked --no-default-features
 
   # also checks the minimum Rust version: the Debian package builds with trixie's rustc
   build:

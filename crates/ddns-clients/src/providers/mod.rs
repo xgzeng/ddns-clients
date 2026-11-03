@@ -5,6 +5,8 @@
 //!
 //! - [`CloudflareProvider`](cloudflare::CloudflareProvider).
 //! - [`NoIpProvider`](noip::NoIpProvider).
+//! - `PkarrProvider` in [`pkarr`](self#modules), with the `pkarr` feature (on
+//!   by default).
 //!
 //! Records are identified by their address; provider-internal record ids
 //! never leave the implementation. Deciding which operations to run is up to
@@ -12,11 +14,16 @@
 
 pub mod cloudflare;
 pub mod noip;
+#[cfg(feature = "pkarr")]
+pub mod pkarr;
 
 /// Name of the Cloudflare provider for [`DynDnsClient::provider`](crate::DynDnsClient::provider).
 pub const CLOUDFLARE: &str = "cloudflare";
 /// Name of the No-IP provider for [`DynDnsClient::provider`](crate::DynDnsClient::provider).
 pub const NOIP: &str = "noip";
+/// Name of the PKARR provider for [`DynDnsClient::provider`](crate::DynDnsClient::provider).
+#[cfg(feature = "pkarr")]
+pub const PKARR: &str = "pkarr";
 
 use std::{
     net::IpAddr,

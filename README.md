@@ -17,6 +17,7 @@ DNS providers:
 |---|---|
 | Cloudflare | API token with `Zone:Read` and `DNS:Edit` |
 | No-IP | at most one A and one AAAA record per hostname, which can be re-pointed but not removed; TTL is ignored; current records are read from No-IP's nameservers over DNS |
+| [PKARR](https://pkdns.net) | records under an Ed25519 key, published on the Mainline DHT and PKARR relays and republished every `cache_expire`; the `pkarr` cargo feature, on by default |
 
 IP resolvers: HTTP echo services (icanhazip, ipify, or custom URLs) and local
 interfaces via netlink (Linux).

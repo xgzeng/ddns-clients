@@ -5,6 +5,8 @@
 //! - A [`DynDnsProvider`] changes a domain's address records on a DNS
 //!   service, e.g. [`CloudflareProvider`] or [`NoIpProvider`]; see
 //!   [`providers`].
+//!
+//! The `pkarr` feature (on by default) adds the PKARR provider.
 //! - A [`DynDnsClient`] wraps a provider, chosen by name, for one domain.
 //!
 //! ```no_run
@@ -39,4 +41,6 @@ pub use client::{DynDnsClient, DynDnsClientBuilder, UpdateSummary};
 pub use providers::DynDnsProvider;
 pub use providers::cloudflare::CloudflareProvider;
 pub use providers::noip::NoIpProvider;
+#[cfg(feature = "pkarr")]
+pub use providers::pkarr::PkarrProvider;
 pub use resolve::IpResolver;

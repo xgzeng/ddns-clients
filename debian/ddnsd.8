@@ -13,7 +13,7 @@ ddnsd \- dynamic DNS daemon
 .B ddnsd
 periodically finds this host's public IPv4 and IPv6 addresses and keeps the
 A and AAAA records of one or more domains pointed at them, using the
-Cloudflare and No-IP DNS providers.
+Cloudflare and No-IP DNS providers, or PKARR records on the Mainline DHT.
 .PP
 Addresses are found with HTTP echo services (icanhazip, ipify or custom URLs)
 or from the global addresses of local network interfaces, tried in the

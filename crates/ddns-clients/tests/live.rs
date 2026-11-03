@@ -14,6 +14,8 @@
 //! - No-IP: `DDNS_NOIP_USERNAME`, `DDNS_NOIP_PASSWORD` and
 //!   `DDNS_NOIP_HOSTNAME` (an existing hostname with one A record). The
 //!   hostname's A record is pointed at a test address and then restored.
+//! - PKARR: only network access. Test addresses are published under a fresh
+//!   random key, and expire from the DHT after a few hours.
 
 use std::net::IpAddr;
 
@@ -229,5 +231,55 @@ mod noip {
         restored.sort();
         original.sort();
         assert_eq!(restored, original);
+    }
+}
+
+#[cfg(feature = "pkarr")]
+mod pkarr {
+    use std::{io::Read, net::IpAddr};
+
+    use ddns_clients::{DynDnsProvider, PkarrProvider};
+
+    use super::ip;
+
+    /// A fresh random secret key, as hex.
+    fn random_secret_key() -> String {
+        let mut key = [0u8; 32];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut urandom| urandom.read_exact(&mut key))
+            .unwrap();
+        key.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// The addresses read from the network by a new provider, sorted.
+    async fn published(secret_key: &str) -> Vec<IpAddr> {
+        let mut provider = PkarrProvider::new(secret_key, "home", None).unwrap();
+        let mut ips = provider.list().await.unwrap();
+        ips.sort();
+        ips
+    }
+
+    #[tokio::test]
+    #[ignore = "needs network"]
+    async fn record_lifecycle() {
+        let secret_key = random_secret_key();
+        let mut provider = PkarrProvider::new(&secret_key, "home", None).unwrap();
+        eprintln!("using pkarr test domain {}", provider.domain());
+        assert!(provider.list().await.unwrap().is_empty());
+
+        let (a1, a2, aaaa1) = (ip("192.0.2.1"), ip("198.51.100.1"), ip("2001:db8::1"));
+        provider.add(a1, Some(120)).await.unwrap();
+        provider.add(aaaa1, Some(120)).await.unwrap();
+        assert_eq!(published(&secret_key).await, [a1, aaaa1]);
+
+        provider.replace(a1, a2, None).await.unwrap();
+        // republishes what it reads
+        provider.refresh_cache().await.unwrap();
+        assert_eq!(provider.list().await.unwrap(), [a2, aaaa1]);
+        assert_eq!(published(&secret_key).await, [a2, aaaa1]);
+
+        provider.delete(a2).await.unwrap();
+        provider.delete(aaaa1).await.unwrap();
+        assert!(published(&secret_key).await.is_empty());
     }
 }

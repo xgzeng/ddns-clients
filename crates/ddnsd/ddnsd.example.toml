@@ -40,3 +40,14 @@ domain = "myhost.example.com"  # optional for cloudflare, default <hostname>; th
 # user_agent = "..."           # optional; "Company Program/Version contact@example.com"
 # domain = "myhost.ddns.net"   # required
 # ipv6 = false                 # overrides the default above
+
+# [provider.pkarr]
+# secret_key = "..."           # 64 hex digits: openssl rand -hex 32
+# secret_file = "pkarr.key"    # or a file holding it, mode 600; relative to this
+#                              # file's directory. One of the two is required
+# domain = "home"              # optional, the name below the key: home.<public key>;
+#                              # default the key itself
+# relays = []                  # optional; relay URLs besides the DHT, [] = DHT only;
+#                              # default pkarr's relays
+# keep_other_records = true    # optional; keep the key's other records, default true
+# cache_expire = 3600          # the records are published again this often; not 0

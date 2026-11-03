@@ -12,9 +12,10 @@ Rules-Requires-Root: no
 Package: ddnsd
 Architecture: linux-any
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: dynamic DNS daemon for Cloudflare and No-IP
+Description: dynamic DNS daemon for Cloudflare, No-IP and PKARR
  ddnsd periodically finds this host's public IPv4 and IPv6 addresses, using
  HTTP echo services or the addresses of local network interfaces, and keeps
  the A and AAAA records of one or more domains pointed at them.
  .
- Supported DNS providers are Cloudflare and No-IP.
+ Supported DNS providers are Cloudflare and No-IP, and PKARR (records signed
+ with an Ed25519 key, published on the Mainline DHT and PKARR relays).

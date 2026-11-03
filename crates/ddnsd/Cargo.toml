@@ -6,6 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 description = "Dynamic DNS daemon built on the ddns-clients library."
 
+[features]
+default = ["pkarr"]
+# the PKARR provider
+pkarr = ["ddns-clients/pkarr"]
+
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4.5.35", features = ["derive"] }
