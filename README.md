@@ -116,7 +116,10 @@ domain = "home"                # home.example.com
 
 See [docs/configuration.md](docs/configuration.md) for all settings.
 
-Failed updates are retried every `tick` (15 seconds by default). After server
+The public addresses are looked up every `resolve_interval` (5 minutes by
+default), and on Linux also within a `tick` after the global addresses of a
+local interface change, e.g. after a WAN reconnect. Failed updates are retried
+every `tick` (15 seconds by default). After server
 errors or rate limiting the daemon waits as long as the provider asks (30
 minutes for No-IP), and a provider that rejects the credentials isn't updated
 again until ddnsd is restarted.

@@ -1,11 +1,18 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::{
+    fmt,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use netlink_packet_route::{
-    AddressFamily,
+    AddressFamily, RouteNetlinkMessage,
     address::{AddressAttribute, AddressScope},
+};
+use rtnetlink::{
+    MulticastGroup,
+    packet_core::{NetlinkMessage, NetlinkPayload},
 };
 
 use super::IpResolver;
@@ -54,6 +61,97 @@ impl IpResolver for LocalResolver {
             })
             .collect())
     }
+}
+
+/// Waits for changes of the global addresses of local interfaces, or of one
+/// interface, e.g. to look up the public addresses again after a WAN
+/// reconnect.
+///
+/// Listens for the kernel's address notifications via netlink, and reports a
+/// change only when the global, non-deprecated addresses differ, not on e.g.
+/// IPv6 lifetime updates. Must be used from within a Tokio runtime.
+pub struct AddressMonitor {
+    messages: BoxStream<'static, NetlinkMessage<RouteNetlinkMessage>>,
+    /// The interface to watch; all if `None`.
+    interface: Option<String>,
+    /// The sorted addresses last read.
+    known: Vec<IpAddr>,
+}
+
+impl AddressMonitor {
+    /// Starts watching `interface`, or all interfaces if `None`. An interface
+    /// that doesn't exist, e.g. while a PPPoE link is down, has no addresses
+    /// until it appears. Fails if the netlink socket can't be opened.
+    pub async fn new(interface: Option<&str>) -> Result<Self> {
+        let (conn, _, messages) = rtnetlink::new_multicast_connection(&[
+            MulticastGroup::Ipv4Ifaddr,
+            MulticastGroup::Ipv6Ifaddr,
+        ])
+        .context("open netlink socket")?;
+        tokio::spawn(conn);
+
+        // listening already, so no change is missed between here and changed()
+        let interface = interface.map(str::to_owned);
+        let known = match all_global_addrs(interface.as_deref()).await {
+            Ok(addrs) => addrs,
+            Err(err) => {
+                log::warn!("{err:#}; waiting for it");
+                vec![]
+            }
+        };
+        Ok(AddressMonitor {
+            messages: messages.map(|(message, _)| message).boxed(),
+            interface,
+            known,
+        })
+    }
+
+    /// Waits until the addresses differ from when this monitor was created or
+    /// this last returned. Fails if the netlink socket closes.
+    pub async fn changed(&mut self) -> Result<()> {
+        loop {
+            let Some(message) = self.messages.next().await else {
+                bail!("netlink address monitor closed");
+            };
+            if !matches!(
+                message.payload,
+                NetlinkPayload::InnerMessage(
+                    RouteNetlinkMessage::NewAddress(_) | RouteNetlinkMessage::DelAddress(_)
+                )
+            ) {
+                continue;
+            }
+            let addrs = match all_global_addrs(self.interface.as_deref()).await {
+                Ok(addrs) => addrs,
+                Err(err) => {
+                    log::debug!("{err:#}");
+                    vec![]
+                }
+            };
+            if addrs != self.known {
+                self.known = addrs;
+                return Ok(());
+            }
+        }
+    }
+}
+
+impl fmt::Debug for AddressMonitor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AddressMonitor")
+            .field("interface", &self.interface)
+            .field("known", &self.known)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The sorted global, non-deprecated addresses of both families, on local
+/// interfaces or only on `interface`.
+async fn all_global_addrs(interface: Option<&str>) -> Result<Vec<IpAddr>> {
+    let mut addrs = global_addrs(AddressFamily::Inet, interface).await?;
+    addrs.extend(global_addrs(AddressFamily::Inet6, interface).await?);
+    addrs.sort();
+    Ok(addrs)
 }
 
 /// The global, non-deprecated addresses of `wanted_family` on local

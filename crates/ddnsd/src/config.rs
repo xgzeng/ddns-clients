@@ -174,6 +174,10 @@ pub struct Config {
     /// skipped.
     #[serde(default = "default_resolvers")]
     pub resolvers: Vec<ResolverConfig>,
+    /// The interface whose address changes make the daemon look up the
+    /// addresses at the next check; all interfaces if unset.
+    #[cfg(target_os = "linux")]
+    pub watch_interface: Option<String>,
     /// Providers to update, by name.
     #[serde(default)]
     pub provider: BTreeMap<String, ProviderConfig>,
@@ -338,6 +342,10 @@ impl Config {
         }
         for resolver in &config.resolvers {
             resolver.check()?;
+        }
+        #[cfg(target_os = "linux")]
+        if config.watch_interface.as_deref() == Some("") {
+            bail!("watch_interface must not be empty");
         }
         if config.provider.is_empty() {
             bail!("no provider configured, add a [provider.<name>] table");
@@ -868,6 +876,17 @@ cache_expire = 600
         assert!(err.to_string().contains("must be a full name"), "{err}");
         let err = load("noipempty", &provider("")).unwrap_err();
         assert!(err.to_string().contains("invalid domain"), "{err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watch_interface() {
+        let config = load("watch", &format!("watch_interface = \"wan\"\n{MINIMAL}")).unwrap();
+        assert_eq!(config.watch_interface.as_deref(), Some("wan"));
+        let config = load("nowatch", MINIMAL).unwrap();
+        assert_eq!(config.watch_interface, None);
+        let err = load("emptywatch", &format!("watch_interface = \"\"\n{MINIMAL}")).unwrap_err();
+        assert_eq!(err.to_string(), "watch_interface must not be empty");
     }
 
     #[test]

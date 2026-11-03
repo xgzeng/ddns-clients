@@ -18,6 +18,10 @@ Cloudflare and No-IP DNS providers, or PKARR records on the Mainline DHT.
 Addresses are found with HTTP echo services (icanhazip, ipify or custom URLs)
 and from the global addresses of local network interfaces, or of one interface;
 the addresses of the configured resolvers are merged for each address family.
+They are looked up every
+.B resolve_interval
+seconds, and also at the next check after the global addresses of a local
+interface change, e.g. after a WAN reconnect.
 .PP
 When a provider rejects an update in a way that needs the configuration to be
 fixed, such as invalid credentials, the daemon stops updating that provider

@@ -4,6 +4,10 @@ use std::{
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -169,6 +173,9 @@ struct Daemon {
     /// providers are updated to; empty if none has been yet.
     public_ipv4: Vec<Ipv4Addr>,
     public_ipv6: Vec<Ipv6Addr>,
+    /// Set when the local addresses changed, to look up the public ones at
+    /// the next check.
+    addresses_changed: Arc<AtomicBool>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -184,9 +191,40 @@ async fn main() -> Result<()> {
     let dry_run = matches!(args.command, Some(Command::DryRun));
     let mut daemon = Daemon::from_config(&config, targets, dry_run);
     match args.command {
-        None => daemon.run().await,
+        None => {
+            #[cfg(target_os = "linux")]
+            watch_addresses(
+                config.watch_interface.clone(),
+                daemon.addresses_changed.clone(),
+            );
+            daemon.run().await
+        }
         Some(Command::DryRun) => daemon.dry_run().await,
     }
+}
+
+/// Sets `changed` whenever the global addresses of `interface`, or of all
+/// interfaces, change; in the background, until the netlink socket fails.
+#[cfg(target_os = "linux")]
+fn watch_addresses(interface: Option<String>, changed: Arc<AtomicBool>) {
+    tokio::spawn(async move {
+        let mut monitor =
+            match ddns_clients::resolve::AddressMonitor::new(interface.as_deref()).await {
+                Ok(monitor) => monitor,
+                Err(err) => {
+                    log::warn!("not watching local addresses: {err:#}");
+                    return;
+                }
+            };
+        loop {
+            if let Err(err) = monitor.changed().await {
+                log::warn!("stopped watching local addresses: {err:#}");
+                return;
+            }
+            log::info!("local addresses changed");
+            changed.store(true, Ordering::Relaxed);
+        }
+    });
 }
 
 impl Daemon {
@@ -228,6 +266,7 @@ impl Daemon {
             resolved_at: None,
             public_ipv4: vec![],
             public_ipv6: vec![],
+            addresses_changed: Arc::default(),
         }
     }
 
@@ -256,9 +295,12 @@ impl Daemon {
     }
 
     /// Looks up the public addresses if `resolve_interval` has passed since
-    /// the last lookup, passes them on to the providers, and lets each one
-    /// update.
+    /// the last lookup or the local addresses changed, passes them on to the
+    /// providers, and lets each one update.
     async fn tick(&mut self) {
+        if self.addresses_changed.swap(false, Ordering::Relaxed) {
+            self.resolved_at = None;
+        }
         if self
             .resolved_at
             .is_none_or(|at| at.elapsed() >= self.resolve_interval)
@@ -639,6 +681,19 @@ mod tests {
         daemon.public_ipv4.clear();
         daemon.tick().await;
         assert!(daemon.public_ipv4.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolves_after_addresses_changed() {
+        let (good, _) = entry("good", None);
+        let mut daemon = daemon(vec![good]);
+
+        daemon.tick().await;
+        daemon.public_ipv4.clear();
+        daemon.addresses_changed.store(true, Ordering::Relaxed);
+        daemon.tick().await;
+        assert!(!daemon.public_ipv4.is_empty());
+        assert!(!daemon.addresses_changed.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

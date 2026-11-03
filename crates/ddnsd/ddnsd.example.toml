@@ -8,6 +8,8 @@
 tick = 15                      # seconds between checks, which retry failed
                                # updates; default 15
 resolve_interval = 300         # seconds between public ip lookups, default 300
+# watch_interface = "eth0"     # look up at the next check after this interface's
+                               # addresses change; default: all interfaces (Linux)
 resolvers = [                  # merged, failed ones skipped; this is the default:
   { type = "all", resolvers = [  # local addresses and those an echo service sees
     { type = "local" },          # global addresses of local interfaces; only one

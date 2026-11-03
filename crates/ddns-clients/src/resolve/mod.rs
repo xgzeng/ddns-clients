@@ -24,7 +24,7 @@ use futures_util::future::join_all;
 
 pub use http::HttpResolver;
 #[cfg(target_os = "linux")]
-pub use local::LocalResolver;
+pub use local::{AddressMonitor, LocalResolver};
 
 /// A source of this host's public IP addresses.
 ///
