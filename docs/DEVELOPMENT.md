@@ -4,7 +4,7 @@
 
 | Path | |
 |---|---|
-| `crates/ddns-clients` | Library: `IpResolver` trait and resolvers (`resolve/`); `DynDnsProvider` trait with the primitive record operations on one domain, and the providers with their record caches (`providers/`); `DynDnsClient`, which plans the operations (`client/plan.rs`) and adds the address-family restriction, `max_records` and `replace_only`, and its builder (`client.rs`) |
+| `crates/ddns-clients` | Library: `IpResolver` trait and resolvers (`resolve/`); `DynDnsProvider` trait with the primitive record operations on one domain, and the providers with their record caches (`providers/`); `DynDnsClient`, which plans the operations (`client/plan.rs`) and adds the address-family restriction, `max_records` and `replace_only`, and its builder (`client/mod.rs`) |
 | `crates/ddnsd` | Daemon: TOML config (`config.rs`), and the `Daemon` (`main.rs`) that keeps every provider's domain at the resolved IPs, with its tick loop, periodic refresh and `dry-run`; each `ProviderInstance` pushes the addresses and retries failures on its ticks |
 | `debian/` | Debian packaging of `ddnsd` |
 | `docs/` | Documentation: the `ddnsd` configuration file, and this file |
@@ -75,7 +75,7 @@ may block the client's IP.
    `providers::NEVER`.
 2. Add its name constant to `providers/mod.rs` and re-export the type in
    `lib.rs`.
-3. Add a `Kind` variant to `client.rs`, with its required and optional
+3. Add a `Kind` variant to `client/mod.rs`, with its required and optional
    parameters and how `build()` constructs it; add builder methods for new
    parameters.
 4. Add new parameters to `ProviderConfig` in `crates/ddnsd/src/config.rs` and
