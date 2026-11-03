@@ -112,7 +112,7 @@ taken from the name:
 [provider.cloudflare]
 api_token = "..."              # needs Zone:Read and DNS:Edit
 zone = "example.com"
-domain = "home.example.com"
+domain = "home"                # home.example.com
 ```
 
 See [docs/configuration.md](docs/configuration.md) for all settings.

@@ -58,17 +58,7 @@ impl DynDnsClient {
     ///
     /// Fails if there is no such provider.
     pub fn provider(name: &str) -> Result<DynDnsClientBuilder> {
-        let kind = match name {
-            CLOUDFLARE => Kind::Cloudflare,
-            NOIP => Kind::NoIp,
-            #[cfg(feature = "pkarr")]
-            PKARR => Kind::Pkarr,
-            _ => bail!(
-                "unknown provider {name:?}, expected one of: {}",
-                Kind::ALL.map(|kind| kind.name()).join(", ")
-            ),
-        };
-        Ok(DynDnsClientBuilder::new(kind))
+        DynDnsClientBuilder::new(name)
     }
 
     /// Creates a client for an existing provider, e.g. a custom
@@ -363,8 +353,23 @@ pub struct DynDnsClientBuilder {
 }
 
 impl DynDnsClientBuilder {
-    fn new(kind: Kind) -> Self {
-        DynDnsClientBuilder {
+    /// Starts building a client for the built-in provider `kind`, e.g.
+    /// [`providers::CLOUDFLARE`](crate::providers::CLOUDFLARE); the same as
+    /// [`DynDnsClient::provider`].
+    ///
+    /// Fails if there is no such provider.
+    pub fn new(kind: &str) -> Result<Self> {
+        let kind = match kind {
+            CLOUDFLARE => Kind::Cloudflare,
+            NOIP => Kind::NoIp,
+            #[cfg(feature = "pkarr")]
+            PKARR => Kind::Pkarr,
+            _ => bail!(
+                "unknown provider {kind:?}, expected one of: {}",
+                Kind::ALL.map(|kind| kind.name()).join(", ")
+            ),
+        };
+        Ok(DynDnsClientBuilder {
             kind,
             api_token: None,
             zone: None,
@@ -383,7 +388,7 @@ impl DynDnsClientBuilder {
             ipv6: true,
             max_records: None,
             replace_only: false,
-        }
+        })
     }
 
     /// Cloudflare API token, needing `Zone:Read` and `DNS:Edit`.
