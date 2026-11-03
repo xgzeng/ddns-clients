@@ -9,8 +9,8 @@ ConditionPathExists=/etc/ddnsd.toml
 
 [Service]
 ExecStart=/usr/sbin/ddnsd -c /etc/ddnsd.toml
-# ddnsd only exits on errors that need a configuration fix (e.g. credentials
-# a provider rejected); restarting would just repeat the rejected request
+# ddnsd only exits on an invalid configuration at startup; restarting would
+# just fail again
 Restart=on-abnormal
 RestartSec=30
 

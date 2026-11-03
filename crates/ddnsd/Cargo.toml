@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "Dynamic DNS daemon built on the ddns-clients library."
 
 [dependencies]
-anyhow = "1.0.97"
+anyhow.workspace = true
 clap = { version = "4.5.35", features = ["derive"] }
 ddns-clients.workspace = true
 env_logger = "0.11.8"

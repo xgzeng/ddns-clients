@@ -20,9 +20,9 @@ or from the global addresses of local network interfaces, tried in the
 configured order for each address family.
 .PP
 When a provider rejects an update in a way that needs the configuration to be
-fixed, such as invalid credentials, the daemon stops updating that provider,
-and exits once all providers have been rejected. After server errors it waits
-as long as the provider asks before updating that provider again.
+fixed, such as invalid credentials, the daemon stops updating that provider
+until it is restarted after fixing the configuration. After server errors it
+waits as long as the provider asks.
 .SH COMMANDS
 .TP
 .B dry\-run

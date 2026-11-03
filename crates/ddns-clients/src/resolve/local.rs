@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use netlink_packet_route::{
@@ -8,7 +9,6 @@ use netlink_packet_route::{
 };
 
 use super::{IpFamily, IpResolver};
-use crate::Result;
 
 /// Resolves addresses assigned to local interfaces via netlink.
 ///
@@ -21,7 +21,7 @@ pub struct LocalResolver;
 #[async_trait]
 impl IpResolver for LocalResolver {
     async fn resolve(&self, family: IpFamily) -> Result<Vec<IpAddr>> {
-        let (conn, handle, _) = rtnetlink::new_connection()?;
+        let (conn, handle, _) = rtnetlink::new_connection().context("open netlink socket")?;
         // Spawn the `Connection` so that it starts polling the netlink socket in the background.
         tokio::spawn(conn);
 
@@ -33,7 +33,7 @@ impl IpResolver for LocalResolver {
         let mut stream = handle.address().get().execute();
         let mut addrs = vec![];
 
-        while let Some(addr_msg) = stream.try_next().await? {
+        while let Some(addr_msg) = stream.try_next().await.context("netlink request failed")? {
             if addr_msg.header.family != wanted_family {
                 continue;
             }

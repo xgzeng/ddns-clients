@@ -9,7 +9,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use ddns_clients::{
-    DynDnsClient, Error, IpResolver, UpdateSummary,
+    DynDnsClient, IpResolver, UpdateSummary,
+    providers::NEVER,
     resolve::{self, AnyResolver, IpFamily},
 };
 
@@ -42,10 +43,6 @@ struct Entry {
     client: DynDnsClient,
     /// Maximum number of address records kept for the domain.
     max_records: usize,
-    /// Set after the provider asked to wait; no update before then.
-    retry_at: Option<Instant>,
-    /// The provider rejected an update; it is not tried again.
-    rejected: bool,
     /// When the provider last read its records from the service.
     refreshed_at: Instant,
 }
@@ -56,14 +53,12 @@ impl Entry {
             name,
             client,
             max_records,
-            retry_at: None,
-            rejected: false,
             refreshed_at: Instant::now(),
         }
     }
 
     fn is_due(&self, now: Instant) -> bool {
-        self.retry_at.is_none_or(|at| at <= now)
+        self.client.next_allowed_update().is_none_or(|at| at <= now)
     }
 }
 
@@ -135,14 +130,10 @@ impl<R: IpResolver> Daemon<R> {
         }
     }
 
-    /// Updates all providers every `interval`, until every provider has
-    /// rejected its updates.
+    /// Updates all providers every `interval`.
     async fn run(&mut self) -> Result<()> {
         loop {
             self.update_all().await;
-            if self.entries.is_empty() {
-                bail!("all providers rejected their updates, fix the configuration and restart");
-            }
             tokio::time::sleep(self.interval).await;
         }
     }
@@ -160,7 +151,7 @@ impl<R: IpResolver> Daemon<R> {
 
     /// Resolves the public IPs once and updates every provider that is due,
     /// first making it read its records again if it hasn't for
-    /// `refresh_interval`. Providers that reject an update are dropped.
+    /// `refresh_interval`.
     ///
     /// Returns the number of providers that were due but failed, all of them
     /// if no public address was found.
@@ -181,7 +172,6 @@ impl<R: IpResolver> Daemon<R> {
 
         let refresh_interval = self.refresh_interval;
         for entry in self.entries.iter_mut().filter(|entry| entry.is_due(now)) {
-            entry.retry_at = None;
             let refresh = refresh_interval
                 .is_some_and(|interval| now.duration_since(entry.refreshed_at) >= interval);
             let result = async {
@@ -204,33 +194,33 @@ impl<R: IpResolver> Daemon<R> {
                 Ok(_) => {}
                 Err(err) => {
                     failed += 1;
-                    match &err {
-                        Error::Rejected(_) => entry.rejected = true,
-                        Error::Unavailable { retry_after, .. } => {
-                            entry.retry_at = Some(now + *retry_after);
-                        }
-                        _ => {}
-                    }
-                    let err = anyhow::Error::from(err);
-                    if entry.rejected {
-                        log::error!(
-                            "{}: {err:#}; giving up on this provider, fix the configuration and restart",
+                    let wait = entry
+                        .client
+                        .next_allowed_update()
+                        .and_then(|at| at.checked_duration_since(Instant::now()));
+                    match wait {
+                        // less than `NEVER` has remained since it was set
+                        Some(wait) if wait > NEVER / 2 => log::error!(
+                            "{}: {err:#}; not trying this provider again, fix the configuration and restart",
                             entry.name
-                        );
-                    } else {
-                        log::warn!("{}: update dns record failed: {err:#}", entry.name);
+                        ),
+                        Some(wait) => log::warn!(
+                            "{}: update dns record failed: {err:#}; next attempt in {} min",
+                            entry.name,
+                            wait.as_secs().div_ceil(60)
+                        ),
+                        None => log::warn!("{}: update dns record failed: {err:#}", entry.name),
                     }
                 }
             }
         }
-        self.entries.retain(|entry| !entry.rejected);
         failed
     }
 
     /// Makes `entry`'s provider read the records again, and warns if they
     /// differ from what it had cached, i.e. they were changed outside ddnsd.
     /// Returns whether they did.
-    async fn refresh_entry(entry: &mut Entry) -> ddns_clients::Result<bool> {
+    async fn refresh_entry(entry: &mut Entry) -> Result<bool> {
         let client = &mut entry.client;
         let mut before = client.list().await?;
         client.refresh().await?;
@@ -250,10 +240,7 @@ impl<R: IpResolver> Daemon<R> {
 
     /// Makes `entry`'s domain point at `ips`: stale records are replaced or
     /// removed, and new ones added up to `max_records`.
-    async fn update_entry(
-        entry: &mut Entry,
-        ips: &[IpAddr],
-    ) -> ddns_clients::Result<UpdateSummary> {
+    async fn update_entry(entry: &mut Entry, ips: &[IpAddr]) -> Result<UpdateSummary> {
         let (keep, stale, add) = Self::changes(entry, ips).await?;
         if stale.is_empty() && add.is_empty() {
             log::debug!("{}: no record changes", entry.client.domain());
@@ -278,7 +265,7 @@ impl<R: IpResolver> Daemon<R> {
     async fn changes(
         entry: &mut Entry,
         ips: &[IpAddr],
-    ) -> ddns_clients::Result<(Vec<IpAddr>, Vec<IpAddr>, Vec<IpAddr>)> {
+    ) -> Result<(Vec<IpAddr>, Vec<IpAddr>, Vec<IpAddr>)> {
         let records = entry.client.list().await?;
         let ips: Vec<IpAddr> = ips
             .iter()
@@ -337,6 +324,7 @@ mod tests {
 
     use std::sync::Mutex;
 
+    use anyhow::anyhow;
     use async_trait::async_trait;
     use ddns_clients::DynDnsProvider;
 
@@ -356,7 +344,7 @@ mod tests {
 
     #[async_trait]
     impl IpResolver for Fixed {
-        async fn resolve(&self, family: IpFamily) -> ddns_clients::Result<Vec<IpAddr>> {
+        async fn resolve(&self, family: IpFamily) -> Result<Vec<IpAddr>> {
             Ok(match family {
                 IpFamily::V4 => vec!["192.0.2.1".parse().unwrap()],
                 IpFamily::V6 => vec![],
@@ -364,30 +352,40 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
-    enum Outcome {
-        Succeed,
-        Reject,
-        Unavailable(Duration),
+    /// What an `OutcomeMock` did, shared with the test.
+    #[derive(Default)]
+    struct Counters {
+        updates: AtomicUsize,
+        refreshes: AtomicUsize,
+        next_update: Mutex<Option<Instant>>,
     }
 
-    /// Has no records, answers every change with `outcome` and counts the
-    /// changes and refreshes.
+    impl Counters {
+        fn updates(&self) -> usize {
+            self.updates.load(Ordering::SeqCst)
+        }
+
+        fn refreshes(&self) -> usize {
+            self.refreshes.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Has no records, and counts the changes and refreshes. With `wait`,
+    /// every change fails and asks to wait that long before the next one.
     struct OutcomeMock {
         domain: String,
-        outcome: Outcome,
-        updates: Arc<AtomicUsize>,
-        refreshes: Arc<AtomicUsize>,
+        wait: Option<Duration>,
+        counters: Arc<Counters>,
     }
 
     impl OutcomeMock {
-        fn change(&self) -> ddns_clients::Result<()> {
-            self.updates.fetch_add(1, Ordering::SeqCst);
-            match self.outcome {
-                Outcome::Succeed => Ok(()),
-                Outcome::Reject => Err(Error::rejected("badauth")),
-                Outcome::Unavailable(retry_after) => Err(Error::unavailable(retry_after, "911")),
-            }
+        fn change(&self) -> Result<()> {
+            self.counters.updates.fetch_add(1, Ordering::SeqCst);
+            let Some(wait) = self.wait else {
+                return Ok(());
+            };
+            *self.counters.next_update.lock().unwrap() = Some(Instant::now() + wait);
+            Err(anyhow!("try later"))
         }
     }
 
@@ -397,100 +395,99 @@ mod tests {
             &self.domain
         }
 
-        async fn list(&mut self) -> ddns_clients::Result<Vec<IpAddr>> {
+        fn next_allowed_update(&self) -> Option<Instant> {
+            *self.counters.next_update.lock().unwrap()
+        }
+
+        async fn list(&mut self) -> Result<Vec<IpAddr>> {
             Ok(vec![])
         }
 
-        async fn refresh(&mut self) -> ddns_clients::Result<()> {
-            self.refreshes.fetch_add(1, Ordering::SeqCst);
+        async fn refresh(&mut self) -> Result<()> {
+            self.counters.refreshes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
-        async fn add(&mut self, _ip: IpAddr, _ttl: Option<u32>) -> ddns_clients::Result<()> {
+        async fn add(&mut self, _ip: IpAddr, _ttl: Option<u32>) -> Result<()> {
             self.change()
         }
 
-        async fn replace(
-            &mut self,
-            _old: IpAddr,
-            _new: IpAddr,
-            _ttl: Option<u32>,
-        ) -> ddns_clients::Result<()> {
+        async fn replace(&mut self, _old: IpAddr, _new: IpAddr, _ttl: Option<u32>) -> Result<()> {
             self.change()
         }
 
-        async fn delete(&mut self, _ip: IpAddr) -> ddns_clients::Result<()> {
+        async fn delete(&mut self, _ip: IpAddr) -> Result<()> {
             self.change()
         }
     }
 
-    /// An entry on an `OutcomeMock`, and its counters of changes and
-    /// refreshes.
-    fn entry(name: &str, outcome: Outcome) -> (Entry, Arc<AtomicUsize>, Arc<AtomicUsize>) {
-        let updates = Arc::new(AtomicUsize::new(0));
-        let refreshes = Arc::new(AtomicUsize::new(0));
+    /// An entry on an `OutcomeMock`, and its counters.
+    fn entry(name: &str, wait: Option<Duration>) -> (Entry, Arc<Counters>) {
+        let counters = Arc::new(Counters::default());
         let mock = OutcomeMock {
             domain: format!("{name}.example.com"),
-            outcome,
-            updates: updates.clone(),
-            refreshes: refreshes.clone(),
+            wait,
+            counters: counters.clone(),
         };
         let client = DynDnsClient::new(mock);
-        let entry = Entry::new(name.to_string(), client, 2);
-        (entry, updates, refreshes)
+        (Entry::new(name.to_string(), client, 2), counters)
     }
 
     #[tokio::test]
-    async fn rejected_provider_is_dropped() {
-        let (good, good_updates, _) = entry("good", Outcome::Succeed);
-        let (bad, bad_updates, _) = entry("bad", Outcome::Reject);
+    async fn waiting_provider_does_not_hold_up_others() {
+        let (good, good_counters) = entry("good", None);
+        let (bad, bad_counters) = entry("bad", Some(NEVER));
         let mut daemon = daemon(vec![bad, good], None);
 
         assert_eq!(daemon.update_all().await, 1);
-        assert_eq!(daemon.entries.len(), 1);
-        assert_eq!(daemon.entries[0].name, "good");
-        assert_eq!(bad_updates.load(Ordering::SeqCst), 1);
-        assert_eq!(good_updates.load(Ordering::SeqCst), 1);
+        assert_eq!(bad_counters.updates(), 1);
+        assert_eq!(good_counters.updates(), 1);
+
+        // the waiting provider stays configured, and isn't tried
+        assert_eq!(daemon.update_all().await, 0);
+        assert_eq!(daemon.entries.len(), 2);
+        assert_eq!(bad_counters.updates(), 1);
+        assert_eq!(good_counters.updates(), 2);
     }
 
     #[tokio::test]
-    async fn unavailable_provider_waits() {
-        let (busy, busy_updates, _) =
-            entry("busy", Outcome::Unavailable(Duration::from_secs(1800)));
-        let mut daemon = daemon(vec![busy], None);
+    async fn provider_waits_until_next_allowed_update() {
+        let (busy, counters) = entry("busy", Some(Duration::from_secs(1800)));
+        let mut daemon = daemon(vec![busy], Some(Duration::ZERO));
 
         daemon.update_all().await;
-        assert_eq!(busy_updates.load(Ordering::SeqCst), 1);
-        assert!(daemon.entries[0].retry_at.is_some());
+        assert_eq!(counters.updates(), 1);
+        assert_eq!(counters.refreshes(), 1);
 
         // still waiting: not even the records are refreshed
         daemon.update_all().await;
-        assert_eq!(busy_updates.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.updates(), 1);
+        assert_eq!(counters.refreshes(), 1);
 
-        daemon.entries[0].retry_at = Some(Instant::now());
+        *counters.next_update.lock().unwrap() = Some(Instant::now());
         daemon.update_all().await;
-        assert_eq!(busy_updates.load(Ordering::SeqCst), 2);
-        assert_eq!(daemon.entries.len(), 1);
+        assert_eq!(counters.updates(), 2);
+        assert_eq!(counters.refreshes(), 2);
     }
 
     #[tokio::test]
     async fn refreshes_when_due() {
-        let (entry, updates, refreshes) = entry("home", Outcome::Succeed);
+        let (entry, counters) = entry("home", None);
         let mut daemon = daemon(vec![entry], Some(Duration::from_secs(3600)));
 
         // refreshed at creation, so not due within the hour
         daemon.update_all().await;
-        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
-        assert_eq!(updates.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.refreshes(), 0);
+        assert_eq!(counters.updates(), 1);
 
         daemon.refresh_interval = Some(Duration::ZERO);
         daemon.update_all().await;
-        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.refreshes(), 1);
 
         // disabled
         daemon.refresh_interval = None;
         daemon.update_all().await;
-        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.refreshes(), 1);
     }
 
     fn rec(id: &str, addr: &str) -> (String, IpAddr) {
@@ -515,21 +512,18 @@ mod tests {
             }
         }
 
-        fn check_fail(&mut self) -> ddns_clients::Result<()> {
+        fn check_fail(&mut self) -> Result<()> {
             if std::mem::take(&mut self.fail_next) {
-                return Err(Error::provider("injected failure"));
+                return Err(anyhow!("injected failure"));
             }
             Ok(())
         }
 
-        fn position(&self, ip: IpAddr) -> ddns_clients::Result<usize> {
+        fn position(&self, ip: IpAddr) -> Result<usize> {
             self.records
                 .iter()
                 .position(|(_, r)| *r == ip)
-                .ok_or_else(|| Error::RecordNotFound {
-                    domain: "host.example.com".to_string(),
-                    ip,
-                })
+                .ok_or_else(|| anyhow!("host.example.com has no record for {ip}"))
         }
 
         fn ips(&self) -> Vec<IpAddr> {
@@ -548,7 +542,7 @@ mod tests {
             "host.example.com"
         }
 
-        async fn list(&mut self) -> ddns_clients::Result<Vec<IpAddr>> {
+        async fn list(&mut self) -> Result<Vec<IpAddr>> {
             let mut state = self.0.lock().unwrap();
             state.list_calls += 1;
             state.check_fail()?;
@@ -558,12 +552,12 @@ mod tests {
             Ok(state.records.iter().map(|(_, ip)| *ip).collect())
         }
 
-        async fn refresh(&mut self) -> ddns_clients::Result<()> {
+        async fn refresh(&mut self) -> Result<()> {
             self.0.lock().unwrap().stale = None;
             Ok(())
         }
 
-        async fn add(&mut self, ip: IpAddr, _ttl: Option<u32>) -> ddns_clients::Result<()> {
+        async fn add(&mut self, ip: IpAddr, _ttl: Option<u32>) -> Result<()> {
             let state = &mut *self.0.lock().unwrap();
             state.check_fail()?;
             state.next_id += 1;
@@ -571,12 +565,7 @@ mod tests {
             Ok(())
         }
 
-        async fn replace(
-            &mut self,
-            old: IpAddr,
-            new: IpAddr,
-            _ttl: Option<u32>,
-        ) -> ddns_clients::Result<()> {
+        async fn replace(&mut self, old: IpAddr, new: IpAddr, _ttl: Option<u32>) -> Result<()> {
             let state = &mut *self.0.lock().unwrap();
             state.check_fail()?;
             let i = state.position(old)?;
@@ -584,7 +573,7 @@ mod tests {
             Ok(())
         }
 
-        async fn delete(&mut self, ip: IpAddr) -> ddns_clients::Result<()> {
+        async fn delete(&mut self, ip: IpAddr) -> Result<()> {
             let state = &mut *self.0.lock().unwrap();
             state.check_fail()?;
             let i = state.position(ip)?;

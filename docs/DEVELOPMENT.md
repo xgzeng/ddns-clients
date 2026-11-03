@@ -7,7 +7,7 @@
 | `crates/ddns-clients` | Library: `IpResolver` trait and resolvers (`resolve/`); `DynDnsProvider` trait with the primitive record operations on one domain, and the providers with their record caches (`providers/`); `DynDnsClient`, which plans the operations (`client/plan.rs`) and adds the address-family restriction and `replace_only`, and its builder (`client.rs`) |
 | `crates/ddnsd` | Daemon: TOML config (`config.rs`), and the `Daemon` (`main.rs`) that keeps every provider's domain at the resolved IPs within `max_records`, with its update loop, periodic refresh and `dry-run` |
 | `debian/` | Debian packaging of `ddnsd` |
-| `docs/` | User documentation: the `ddnsd` configuration file |
+| `docs/` | Documentation: the `ddnsd` configuration file, and this file |
 | `openwrt/` | OpenWrt packaging of `ddnsd` |
 | `scripts/` | Helper scripts, e.g. `build-deb.sh` |
 | `.github/workflows/` | CI and releases |
@@ -64,11 +64,12 @@ may block the client's IP.
    `replace` and `delete`, each a direct call of the service's API;
    `DynDnsClient` decides which to run. The provider may cache records (and
    ids); it then implements `refresh`, keeps the cache in step with its own
-   operations and drops it when one fails. Return `Error::RecordNotFound`
-   when `replace` or `delete` finds no record with the address,
-   `Error::Unsupported` for operations the service can't do,
-   `Error::Rejected` for errors that need a configuration fix and
-   `Error::Unavailable` when the service asks clients to back off.
+   operations and drops it when one fails. Operations return `anyhow` errors,
+   also when `replace` or `delete` finds no record with the address or the
+   service can't do the operation. If the service asks clients to back off,
+   implement `next_allowed_update` to say when the next update may be sent; if
+   an error needs a configuration fix, return the current time plus
+   `providers::NEVER`.
 2. Add its name constant to `providers/mod.rs` and re-export the type in
    `lib.rs`.
 3. Add a `Kind` variant to `client.rs`, with its required and optional

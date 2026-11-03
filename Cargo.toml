@@ -9,6 +9,7 @@ license = "MIT"
 rust-version = "1.85"
 
 [workspace.dependencies]
+anyhow = "1.0.97"
 ddns-clients = { path = "crates/ddns-clients" }
 log = "0.4"
 tokio = "1.44"

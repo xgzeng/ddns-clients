@@ -15,9 +15,8 @@ mod local;
 
 use std::net::IpAddr;
 
+use anyhow::Result;
 use async_trait::async_trait;
-
-use crate::Result;
 
 pub use http::HttpResolver;
 #[cfg(target_os = "linux")]
@@ -65,7 +64,7 @@ impl<R: IpResolver> IpResolver for Vec<R> {
                 Ok(addrs) if !addrs.is_empty() => return Ok(addrs),
                 Ok(_) => last_err = None,
                 Err(err) => {
-                    log::warn!("resolve {family:?} address failed: {}", err.chain());
+                    log::warn!("resolve {family:?} address failed: {err:#}");
                     last_err = Some(err);
                 }
             }
@@ -131,7 +130,7 @@ pub async fn resolve_public_ips<R: IpResolver>(resolver: &R, families: &[IpFamil
     for &family in families {
         match resolver.resolve(family).await {
             Ok(found) => addrs.extend(found),
-            Err(err) => log::warn!("no {family:?} address resolved: {}", err.chain()),
+            Err(err) => log::warn!("no {family:?} address resolved: {err:#}"),
         }
     }
     addrs
@@ -139,8 +138,9 @@ pub async fn resolve_public_ips<R: IpResolver>(resolver: &R, families: &[IpFamil
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
+
     use super::*;
-    use crate::Error;
 
     /// Returns fixed results: `None` fails, `Some` returns the addresses.
     struct Fixed {
@@ -155,9 +155,7 @@ mod tests {
                 IpFamily::V4 => &self.v4,
                 IpFamily::V6 => &self.v6,
             };
-            addrs
-                .clone()
-                .ok_or_else(|| Error::provider("fixed failure"))
+            addrs.clone().ok_or_else(|| anyhow!("fixed failure"))
         }
     }
 

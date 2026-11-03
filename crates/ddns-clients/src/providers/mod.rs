@@ -18,11 +18,19 @@ pub const CLOUDFLARE: &str = "cloudflare";
 /// Name of the No-IP provider for [`DynDnsClient::provider`](crate::DynDnsClient::provider).
 pub const NOIP: &str = "noip";
 
-use std::net::IpAddr;
+use std::{
+    net::IpAddr,
+    time::{Duration, Instant},
+};
 
+use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::Result;
+/// A wait of about 100 years. [`Instant`] has no infinite value, so
+/// [`next_allowed_update`](DynDnsProvider::next_allowed_update) returns the
+/// current time plus this when no further update should be sent, e.g. until
+/// bad credentials are fixed.
+pub const NEVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
 
 /// The address records of one domain on a DNS service.
 ///
@@ -35,14 +43,21 @@ use crate::Result;
 /// The cache must follow the provider's own operations, and be dropped when
 /// an operation fails.
 ///
-/// Operations a service cannot perform return [`Error::Unsupported`](crate::Error::Unsupported),
-/// and [`replace`](Self::replace) and [`delete`](Self::delete) return
-/// [`Error::RecordNotFound`](crate::Error::RecordNotFound) if there is no
+/// Operations fail if the service cannot perform them, and
+/// [`replace`](Self::replace) and [`delete`](Self::delete) fail if there is no
 /// record with the address.
 #[async_trait]
 pub trait DynDnsProvider: Send {
     /// The domain whose records this provider manages.
     fn domain(&self) -> &str;
+
+    /// When the next update may be sent, e.g. after the service asked clients
+    /// to back off; `None` means there is no restriction. The time may be in
+    /// the past, or [`NEVER`] away if no further update should be sent. Callers
+    /// should wait until then; it isn't enforced.
+    fn next_allowed_update(&self) -> Option<Instant> {
+        None
+    }
 
     /// Addresses of all A and AAAA records, one per record; possibly cached.
     async fn list(&mut self) -> Result<Vec<IpAddr>>;

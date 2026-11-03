@@ -276,6 +276,7 @@ dependencies = [
 name = "ddns-clients"
 version = "0.0.3"
 dependencies = [
+ "anyhow",
  "async-trait",
  "futures-util",
  "log",
@@ -284,7 +285,6 @@ dependencies = [
  "rtnetlink",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
 ]
 

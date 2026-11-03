@@ -3,12 +3,12 @@
 
 use std::{fmt, net::IpAddr};
 
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::DynDnsProvider;
-use crate::{Error, Result};
 
 const BASE_URL: &str = "https://api.cloudflare.com/client/v4";
 
@@ -31,7 +31,7 @@ pub struct CloudflareProvider {
 
 /// An error response from the Cloudflare API.
 ///
-/// Returned inside [`Error::Provider`]; use `downcast_ref` to inspect it.
+/// Use `downcast_ref` on the returned [`anyhow::Error`] to inspect it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudflareError {
     /// The HTTP status code.
@@ -111,8 +111,8 @@ fn record_type(ip: IpAddr) -> &'static str {
 }
 
 /// Extracts the `result` of a response, or the error it describes.
-fn parse_response<T: DeserializeOwned>(status: u16, body: &str) -> Result<T> {
-    let failure = |errors| Error::provider(CloudflareError { status, errors });
+fn parse_response<T: DeserializeOwned>(status: u16, body: &str) -> Result<T, CloudflareError> {
+    let failure = |errors| CloudflareError { status, errors };
     let Ok(envelope) = serde_json::from_str::<Envelope<T>>(body) else {
         return Err(failure(vec![]));
     };
@@ -181,7 +181,7 @@ impl CloudflareProvider {
         let response = request.bearer_auth(&self.api_token).send().await?;
         let status = response.status().as_u16();
         let body = response.text().await?;
-        parse_response(status, &body)
+        Ok(parse_response(status, &body)?)
     }
 
     async fn zone_id(&mut self) -> Result<String> {
@@ -195,7 +195,7 @@ impl CloudflareProvider {
             .query(&[("name", &self.zone_name)]);
         let zones: Vec<Zone> = self.call(request).await?;
         let Some(zone) = zones.into_iter().next() else {
-            return Err(Error::ZoneNotFound(self.zone_name.clone()));
+            bail!("zone {:?} not found", self.zone_name);
         };
         self.zone_id = Some(zone.id.clone());
         Ok(zone.id)
@@ -236,10 +236,7 @@ impl CloudflareProvider {
             );
         }
         let records = self.fetch().await?;
-        find_id(&records, ip).ok_or_else(|| Error::RecordNotFound {
-            domain: self.domain.clone(),
-            ip,
-        })
+        find_id(&records, ip).ok_or_else(|| anyhow!("{} has no record for {ip}", self.domain))
     }
 }
 
@@ -316,13 +313,6 @@ impl DynDnsProvider for CloudflareProvider {
 mod tests {
     use super::*;
 
-    fn cloudflare_error(err: Error) -> CloudflareError {
-        match err {
-            Error::Provider(err) => err.downcast_ref::<CloudflareError>().unwrap().clone(),
-            err => panic!("unexpected error {err:?}"),
-        }
-    }
-
     #[test]
     fn parse_success() {
         let body = r#"{"success":true,"errors":[],"messages":[],"result":[{"id":"z1","name":"example.com"}]}"#;
@@ -333,7 +323,7 @@ mod tests {
     #[test]
     fn parse_api_error() {
         let body = r#"{"success":false,"errors":[{"code":6003,"message":"Invalid request headers"},{"code":6111,"message":"Invalid format for Authorization header"}],"messages":[],"result":null}"#;
-        let err = cloudflare_error(parse_response::<Vec<Zone>>(400, body).unwrap_err());
+        let err = parse_response::<Vec<Zone>>(400, body).unwrap_err();
         assert_eq!(err.status, 400);
         assert_eq!(
             err.to_string(),
@@ -344,7 +334,7 @@ mod tests {
     #[test]
     fn parse_null_result() {
         let body = r#"{"success":true,"errors":[],"result":null}"#;
-        let err = cloudflare_error(parse_response::<Vec<Zone>>(200, body).unwrap_err());
+        let err = parse_response::<Vec<Zone>>(200, body).unwrap_err();
         assert_eq!(err.to_string(), "HTTP 200");
     }
 
@@ -356,7 +346,7 @@ mod tests {
 
     #[test]
     fn parse_non_json() {
-        let err = cloudflare_error(parse_response::<Vec<Zone>>(502, "<html>").unwrap_err());
+        let err = parse_response::<Vec<Zone>>(502, "<html>").unwrap_err();
         assert_eq!(
             err,
             CloudflareError {

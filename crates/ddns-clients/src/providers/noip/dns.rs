@@ -11,12 +11,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::Result;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
-
-use crate::Result;
 
 /// The nameservers of No-IP's hostname domains, e.g. `ddns.net`.
 const NAMESERVERS: [&str; 5] = [
@@ -42,7 +41,7 @@ pub(super) async fn lookup(hostname: &str) -> Result<Vec<IpAddr>> {
         match tokio::time::timeout(TIMEOUT, lookup_at(nameserver, hostname)).await {
             Ok(Ok(ips)) => return Ok(ips),
             Ok(Err(err)) => {
-                log::debug!("{nameserver}: lookup of {hostname} failed: {err}");
+                log::debug!("{nameserver}: lookup of {hostname} failed: {err:#}");
                 last_err = Some(err);
             }
             Err(_) => {

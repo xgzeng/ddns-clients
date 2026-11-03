@@ -3,12 +3,16 @@
 
 mod dns;
 
-use std::{fmt, net::IpAddr, time::Duration};
+use std::{
+    fmt,
+    net::IpAddr,
+    time::{Duration, Instant},
+};
 
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 
-use super::DynDnsProvider;
-use crate::{Error, Result};
+use super::{DynDnsProvider, NEVER};
 
 const UPDATE_URL: &str = "https://dynupdate.no-ip.com/nic/update";
 
@@ -22,7 +26,7 @@ const DEFAULT_USER_AGENT: &str = concat!("ddns-clients ddns-clients/", env!("CAR
 ///
 /// - A hostname has at most one A and one AAAA record. Records cannot be
 ///   deleted, and re-pointing cannot change their type (A ↔ AAAA); such
-///   operations fail with [`Error::Unsupported`].
+///   operations fail.
 /// - The update API cannot read records, so the addresses are read from
 ///   No-IP's nameservers (`nf1`–`nf5.no-ip.com`) over TCP. If none of them
 ///   answers, e.g. for a domain they don't serve, they are read through the
@@ -30,10 +34,10 @@ const DEFAULT_USER_AGENT: &str = concat!("ddns-clients ddns-clients/", env!("CAR
 ///   cached, together with the addresses set by updates, until
 ///   [`refresh`](DynDnsProvider::refresh) or a failed update.
 /// - The TTL of an update is ignored.
-/// - Errors that need user intervention (bad credentials, unknown hostname,
-///   blocked client) are [`Error::Rejected`], and No-IP requires clients to
-///   stop updating until they are fixed. Server errors are
-///   [`Error::Unavailable`] with a 30 minute retry delay.
+/// - After a failed update, [`next_allowed_update`](DynDnsProvider::next_allowed_update)
+///   is 30 minutes away for server errors and [`NEVER`] away for errors that
+///   need user intervention (bad credentials, unknown hostname, blocked
+///   client), as No-IP requires clients to stop updating until they are fixed.
 pub struct NoIpProvider {
     client: reqwest::Client,
     username: String,
@@ -41,12 +45,13 @@ pub struct NoIpProvider {
     hostname: String,
     /// The hostname's addresses, as last read or set; `None` when unknown.
     known: Option<Vec<IpAddr>>,
+    /// No update before this time, after a failed one.
+    next_update: Option<Instant>,
 }
 
 /// An error response from the No-IP update API.
 ///
-/// Returned inside [`Error::Rejected`], [`Error::Unavailable`] or
-/// [`Error::Provider`]; use `downcast_ref` to inspect it.
+/// Use `downcast_ref` on the returned [`anyhow::Error`] to inspect it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NoIpError {
@@ -86,20 +91,33 @@ impl fmt::Display for NoIpError {
 
 impl std::error::Error for NoIpError {}
 
+impl NoIpError {
+    /// How long to wait before the next update after this error.
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            NoIpError::ServerError => Some(RETRY_AFTER),
+            NoIpError::NoHost
+            | NoIpError::BadAuth
+            | NoIpError::BadAgent
+            | NoIpError::NotDonator
+            | NoIpError::Abuse => Some(NEVER),
+            NoIpError::Unexpected { .. } => None,
+        }
+    }
+}
+
 /// Interprets the response to an update of a single hostname to `sent`.
 ///
 /// A success must echo the sent addresses; No-IP has been seen answering
 /// `nochg <client ip>` instead of `badauth` after repeated failed logins.
-fn parse_response(status: u16, body: &str, sent: &[IpAddr]) -> Result<()> {
+fn parse_response(status: u16, body: &str, sent: &[IpAddr]) -> Result<(), NoIpError> {
     let line = body.lines().next().unwrap_or_default().trim();
-    let unexpected = || {
-        Error::provider(NoIpError::Unexpected {
-            status,
-            body: line.to_string(),
-        })
+    let unexpected = || NoIpError::Unexpected {
+        status,
+        body: line.to_string(),
     };
     let (code, echoed) = line.split_once(' ').unwrap_or((line, ""));
-    let err = match code {
+    match code {
         "good" | "nochg" => {
             let echoed: Vec<IpAddr> = echoed
                 .split(',')
@@ -109,18 +127,17 @@ fn parse_response(status: u16, body: &str, sent: &[IpAddr]) -> Result<()> {
             if echoed.len() != sent.len() || !echoed.iter().all(|ip| sent.contains(ip)) {
                 return Err(unexpected());
             }
-            return Ok(());
+            Ok(())
         }
-        "nohost" => NoIpError::NoHost,
-        "badauth" => NoIpError::BadAuth,
-        "badagent" => NoIpError::BadAgent,
-        "!donator" => NoIpError::NotDonator,
-        "abuse" => NoIpError::Abuse,
-        "911" => return Err(Error::unavailable(RETRY_AFTER, NoIpError::ServerError)),
-        _ if status >= 500 => return Err(Error::unavailable(RETRY_AFTER, NoIpError::ServerError)),
-        _ => return Err(unexpected()),
-    };
-    Err(Error::rejected(err))
+        "nohost" => Err(NoIpError::NoHost),
+        "badauth" => Err(NoIpError::BadAuth),
+        "badagent" => Err(NoIpError::BadAgent),
+        "!donator" => Err(NoIpError::NotDonator),
+        "abuse" => Err(NoIpError::Abuse),
+        "911" => Err(NoIpError::ServerError),
+        _ if status >= 500 => Err(NoIpError::ServerError),
+        _ => Err(unexpected()),
+    }
 }
 
 /// Name of `ip`'s record type.
@@ -132,10 +149,10 @@ fn record_type(ip: &IpAddr) -> &'static str {
 /// per family.
 fn added(current: &[IpAddr], ip: IpAddr) -> Result<Vec<IpAddr>> {
     if current.iter().any(|c| c.is_ipv4() == ip.is_ipv4()) {
-        return Err(Error::Unsupported(format!(
+        bail!(
             "No-IP hostnames have at most one {} record",
             record_type(&ip)
-        )));
+        );
     }
     let mut ips = current.to_vec();
     ips.push(ip);
@@ -147,17 +164,14 @@ fn added(current: &[IpAddr], ip: IpAddr) -> Result<Vec<IpAddr>> {
 /// type.
 fn replaced(domain: &str, current: &[IpAddr], old: IpAddr, new: IpAddr) -> Result<Vec<IpAddr>> {
     if !current.contains(&old) {
-        return Err(Error::RecordNotFound {
-            domain: domain.to_string(),
-            ip: old,
-        });
+        bail!("{domain} has no record for {old}");
     }
     if old.is_ipv4() != new.is_ipv4() {
-        return Err(Error::Unsupported(format!(
+        bail!(
             "No-IP cannot change an {} record to {}",
             record_type(&old),
             record_type(&new)
-        )));
+        );
     }
     Ok(current
         .iter()
@@ -193,6 +207,7 @@ impl NoIpProvider {
             password: password.into(),
             hostname: hostname.into(),
             known: None,
+            next_update: None,
         })
     }
 
@@ -214,7 +229,7 @@ impl NoIpProvider {
         match dns::lookup(hostname).await {
             Ok(ips) => return Ok(ips),
             Err(err) => log::warn!(
-                "{hostname}: no answer from No-IP's nameservers ({err}), using the system resolver"
+                "{hostname}: no answer from No-IP's nameservers ({err:#}), using the system resolver"
             ),
         }
         let mut ips = vec![];
@@ -245,9 +260,13 @@ impl NoIpProvider {
             .await?;
         let status = response.status().as_u16();
         let body = response.text().await?;
-        parse_response(status, &body, &ips)?;
+        if let Err(err) = parse_response(status, &body, &ips) {
+            self.next_update = err.retry_after().map(|wait| Instant::now() + wait);
+            return Err(err.into());
+        }
         log::debug!("{}: set addresses to {myip}", self.hostname);
 
+        self.next_update = None;
         self.known = Some(ips);
         Ok(())
     }
@@ -257,6 +276,10 @@ impl NoIpProvider {
 impl DynDnsProvider for NoIpProvider {
     fn domain(&self) -> &str {
         &self.hostname
+    }
+
+    fn next_allowed_update(&self) -> Option<Instant> {
+        self.next_update
     }
 
     async fn list(&mut self) -> Result<Vec<IpAddr>> {
@@ -289,11 +312,11 @@ impl DynDnsProvider for NoIpProvider {
 
     /// Always fails: No-IP records cannot be removed.
     async fn delete(&mut self, ip: IpAddr) -> Result<()> {
-        Err(Error::Unsupported(format!(
+        Err(anyhow!(
             "No-IP cannot remove the {} record of {}",
             record_type(&ip),
             self.hostname
-        )))
+        ))
     }
 }
 
@@ -307,15 +330,6 @@ mod tests {
 
     fn ips(list: &[&str]) -> Vec<IpAddr> {
         list.iter().map(|s| ip(s)).collect()
-    }
-
-    fn inner(err: &Error) -> &NoIpError {
-        let source = match err {
-            Error::Rejected(source) | Error::Provider(source) => source,
-            Error::Unavailable { source, .. } => source,
-            err => panic!("unexpected error {err:?}"),
-        };
-        source.downcast_ref().unwrap()
     }
 
     #[test]
@@ -338,7 +352,7 @@ mod tests {
         ] {
             let err = parse_response(200, body, &sent).unwrap_err();
             assert!(
-                matches!(inner(&err), NoIpError::Unexpected { .. }),
+                matches!(err, NoIpError::Unexpected { .. }),
                 "{body}: {err:?}"
             );
         }
@@ -354,31 +368,25 @@ mod tests {
             ("abuse\n", NoIpError::Abuse),
         ] {
             let err = parse_response(401, body, &[]).unwrap_err();
-            assert!(matches!(err, Error::Rejected(_)), "{body}: {err:?}");
-            assert_eq!(inner(&err), &expected);
+            assert_eq!(err, expected);
+            assert_eq!(err.retry_after(), Some(NEVER), "{body}");
         }
     }
 
     #[test]
-    fn parse_unavailable() {
+    fn parse_server_error() {
         for (status, body) in [(200, "911"), (503, "<html>")] {
             let err = parse_response(status, body, &[]).unwrap_err();
-            let Error::Unavailable { retry_after, .. } = &err else {
-                panic!("{err:?}");
-            };
-            assert_eq!(*retry_after, RETRY_AFTER);
-            assert_eq!(inner(&err), &NoIpError::ServerError);
+            assert_eq!(err, NoIpError::ServerError);
+            assert_eq!(err.retry_after(), Some(RETRY_AFTER));
         }
     }
 
     #[test]
     fn parse_unexpected() {
         let err = parse_response(200, "what", &[]).unwrap_err();
-        assert!(matches!(err, Error::Provider(_)));
-        assert_eq!(
-            err.chain().to_string(),
-            r#"dns provider error: HTTP 200: unexpected response "what""#
-        );
+        assert_eq!(err.retry_after(), None);
+        assert_eq!(err.to_string(), r#"HTTP 200: unexpected response "what""#);
     }
 
     #[test]
@@ -396,7 +404,6 @@ mod tests {
     #[test]
     fn add_rejects_second_per_family() {
         let err = added(&ips(&["192.0.2.1"]), ip("192.0.2.2")).unwrap_err();
-        assert!(matches!(err, Error::Unsupported(_)), "{err:?}");
         assert!(err.to_string().contains("one A record"), "{err}");
     }
 
@@ -419,7 +426,7 @@ mod tests {
     fn replace_rejects_missing_and_type_change() {
         let current = ips(&["192.0.2.1"]);
         let err = replaced("h.ddns.net", &current, ip("192.0.2.9"), ip("192.0.2.2")).unwrap_err();
-        assert!(matches!(err, Error::RecordNotFound { .. }), "{err:?}");
+        assert!(err.to_string().contains("has no record"), "{err}");
         let err = replaced("h.ddns.net", &current, ip("192.0.2.1"), ip("2001:db8::1")).unwrap_err();
         assert!(err.to_string().contains("A record to AAAA"), "{err}");
     }

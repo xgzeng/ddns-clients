@@ -1,11 +1,12 @@
 mod plan;
 
-use std::{fmt, net::IpAddr};
+use std::{fmt, net::IpAddr, time::Instant};
 
+use anyhow::{Result, bail};
 use plan::Operation;
 
 use crate::{
-    CloudflareProvider, DynDnsProvider, Error, NoIpProvider, Result,
+    CloudflareProvider, DynDnsProvider, NoIpProvider,
     providers::{CLOUDFLARE, NOIP},
     resolve::IpFamily,
 };
@@ -19,7 +20,7 @@ use crate::{
 /// those operations.
 ///
 /// ```no_run
-/// # async fn example() -> ddns_clients::Result<()> {
+/// # async fn example() -> anyhow::Result<()> {
 /// use ddns_clients::{DynDnsClient, providers};
 ///
 /// let mut client = DynDnsClient::provider(providers::CLOUDFLARE)?
@@ -50,16 +51,12 @@ impl DynDnsClient {
     /// Starts building a client for the built-in provider `name`, e.g.
     /// [`providers::CLOUDFLARE`](crate::providers::CLOUDFLARE).
     ///
-    /// Fails with [`Error::InvalidConfig`] if there is no such provider.
+    /// Fails if there is no such provider.
     pub fn provider(name: &str) -> Result<DynDnsClientBuilder> {
         let kind = match name {
             CLOUDFLARE => Kind::Cloudflare,
             NOIP => Kind::NoIp,
-            _ => {
-                return Err(Error::InvalidConfig(format!(
-                    "unknown provider {name:?}, expected one of: {CLOUDFLARE}, {NOIP}"
-                )));
-            }
+            _ => bail!("unknown provider {name:?}, expected one of: {CLOUDFLARE}, {NOIP}"),
         };
         Ok(DynDnsClientBuilder::new(kind))
     }
@@ -69,7 +66,7 @@ impl DynDnsClient {
     /// both address families enabled.
     ///
     /// ```no_run
-    /// # fn example() -> ddns_clients::Result<()> {
+    /// # fn example() -> anyhow::Result<()> {
     /// use ddns_clients::{CloudflareProvider, DynDnsClient};
     ///
     /// let provider = CloudflareProvider::new("api-token", "example.com", "myhost.example.com")?;
@@ -133,6 +130,15 @@ impl DynDnsClient {
     /// The domain whose records this client manages.
     pub fn domain(&self) -> &str {
         self.provider.domain()
+    }
+
+    /// When the next [`update`](Self::update) may be sent, e.g. after the
+    /// provider asked clients to back off; `None` means there is no
+    /// restriction. The time may be in the past, or
+    /// [`NEVER`](crate::providers::NEVER) away if no further update should be
+    /// sent. Callers should wait until then; it isn't enforced.
+    pub fn next_allowed_update(&self) -> Option<Instant> {
+        self.provider.next_allowed_update()
     }
 
     /// Addresses of the domain's records of the enabled families. Providers
@@ -449,11 +455,7 @@ impl DynDnsClientBuilder {
         if problems.is_empty() {
             return Ok(());
         }
-        Err(Error::InvalidConfig(format!(
-            "{}: {}",
-            self.kind.name(),
-            problems.join("; ")
-        )))
+        bail!("{}: {}", self.kind.name(), problems.join("; "))
     }
 }
 
@@ -472,6 +474,7 @@ impl fmt::Debug for DynDnsClientBuilder {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use anyhow::anyhow;
     use async_trait::async_trait;
 
     use super::*;
@@ -494,7 +497,7 @@ mod tests {
     impl FakeState {
         fn check_fail(&mut self) -> Result<()> {
             if std::mem::take(&mut self.fail_next) {
-                return Err(Error::provider("injected failure"));
+                return Err(anyhow!("injected failure"));
             }
             Ok(())
         }
@@ -503,10 +506,7 @@ mod tests {
             self.records
                 .iter()
                 .position(|r| *r == ip)
-                .ok_or_else(|| Error::RecordNotFound {
-                    domain: DOMAIN.to_string(),
-                    ip,
-                })
+                .ok_or_else(|| anyhow!("{DOMAIN} has no record for {ip}"))
         }
     }
 
@@ -576,19 +576,14 @@ mod tests {
     }
 
     fn invalid_config(result: Result<DynDnsClient>) -> String {
-        match result {
-            Err(Error::InvalidConfig(message)) => message,
-            other => panic!("expected InvalidConfig, got {other:?}"),
-        }
+        result.unwrap_err().to_string()
     }
 
     #[test]
     fn unknown_provider() {
-        let Err(Error::InvalidConfig(message)) = DynDnsClient::provider("nope") else {
-            panic!("expected InvalidConfig");
-        };
+        let err = DynDnsClient::provider("nope").unwrap_err();
         assert_eq!(
-            message,
+            err.to_string(),
             r#"unknown provider "nope", expected one of: cloudflare, noip"#
         );
     }

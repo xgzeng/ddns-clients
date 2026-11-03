@@ -1,9 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use super::{IpFamily, IpResolver};
-use crate::Result;
 
 /// Resolves addresses by querying an online service that echoes the client's
 /// IP as plain text, with one URL for both families or one per family.
@@ -103,7 +103,7 @@ impl IpResolver for HttpResolver {
             return Ok(vec![]);
         };
 
-        let addr: IpAddr = client
+        let addr = client
             .get(url)
             .send()
             .await?
@@ -111,7 +111,8 @@ impl IpResolver for HttpResolver {
             .text()
             .await?
             .trim()
-            .parse()?;
+            .parse::<IpAddr>()
+            .with_context(|| format!("{url} returned an invalid ip address"))?;
         if IpFamily::of(&addr) != family {
             log::warn!("{url} returned {addr}, expected an {family:?} address");
             return Ok(vec![]);

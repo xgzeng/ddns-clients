@@ -61,7 +61,7 @@ vi /etc/ddnsd.toml
 /etc/init.d/ddnsd start
 ```
 
-To build from source, see [DEVELOPMENT.md](DEVELOPMENT.md).
+To build from source, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Library
 

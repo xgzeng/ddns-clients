@@ -262,12 +262,12 @@ impl Config {
         if let Some(domain) = &provider.domain {
             builder = builder.domain(domain);
         }
-        Ok(builder
+        builder
             .ttl(self.ttl(provider))
             .enable_ipv4(provider.ipv4.unwrap_or(self.ipv4))
             .enable_ipv6(provider.ipv6.unwrap_or(self.ipv6))
             .replace_only(provider.replace_only.unwrap_or(self.replace_only))
-            .build()?)
+            .build()
     }
 
     /// The TTL for `provider`'s records; `None` (configured as 0) uses the
@@ -632,7 +632,7 @@ replace_only = false
         let err = config.targets().err().unwrap();
         assert_eq!(
             format!("{err:#}"),
-            "provider cloudflare: invalid configuration: cloudflare: ipv4 and ipv6 are both disabled"
+            "provider cloudflare: cloudflare: ipv4 and ipv6 are both disabled"
         );
     }
 
@@ -670,7 +670,7 @@ replace_only = false
         let err = config.targets().err().unwrap();
         assert_eq!(
             format!("{err:#}"),
-            r#"provider nope: invalid configuration: unknown provider "nope", expected one of: cloudflare, noip"#
+            r#"provider nope: unknown provider "nope", expected one of: cloudflare, noip"#
         );
     }
 
@@ -689,7 +689,7 @@ username = "me"
         let err = config.targets().err().unwrap();
         assert!(
             format!("{err:#}")
-                .contains("provider home: invalid configuration: cloudflare: missing api_token; username is not used"),
+                .contains("provider home: cloudflare: missing api_token; username is not used"),
             "{err:#}"
         );
     }

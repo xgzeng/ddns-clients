@@ -40,8 +40,9 @@ mod cloudflare {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use anyhow::Result;
     use ddns_clients::{
-        CloudflareProvider, DynDnsProvider, Error, providers::cloudflare::CloudflareError,
+        CloudflareProvider, DynDnsProvider, providers::cloudflare::CloudflareError,
     };
 
     use super::{ip, required_env};
@@ -66,9 +67,7 @@ mod cloudflare {
     }
 
     /// The cached and the actual addresses, each sorted; they should match.
-    async fn sorted_ips(
-        provider: &mut CloudflareProvider,
-    ) -> Result<(Vec<IpAddr>, Vec<IpAddr>), Error> {
+    async fn sorted_ips(provider: &mut CloudflareProvider) -> Result<(Vec<IpAddr>, Vec<IpAddr>)> {
         let mut cached = provider.list().await?;
         cached.sort();
         provider.refresh().await?;
@@ -77,7 +76,7 @@ mod cloudflare {
         Ok((cached, actual))
     }
 
-    async fn delete_all_records(provider: &mut CloudflareProvider) -> Result<(), Error> {
+    async fn delete_all_records(provider: &mut CloudflareProvider) -> Result<()> {
         provider.refresh().await?;
         for ip in provider.list().await? {
             provider.delete(ip).await?;
@@ -85,7 +84,7 @@ mod cloudflare {
         Ok(())
     }
 
-    async fn exercise_records(provider: &mut CloudflareProvider) -> Result<(), Error> {
+    async fn exercise_records(provider: &mut CloudflareProvider) -> Result<()> {
         let domain = provider.domain().to_string();
         let records = provider.list().await?;
         assert!(
@@ -112,7 +111,7 @@ mod cloudflare {
 
         // the AAAA record is gone
         let err = provider.delete(aaaa1).await.unwrap_err();
-        assert!(matches!(err, Error::RecordNotFound { .. }), "{err:?}");
+        assert!(err.to_string().contains("has no record"), "{err:?}");
 
         provider.delete(a2).await?;
         provider.delete(a3).await?;
@@ -159,9 +158,6 @@ mod cloudflare {
             CloudflareProvider::new("not-a-valid-token", "example.com", "ddns.example.com")
                 .unwrap();
         let err = provider.list().await.unwrap_err();
-        let Error::Provider(err) = err else {
-            panic!("unexpected error {err:?}");
-        };
         let err = err
             .downcast_ref::<CloudflareError>()
             .expect("a CloudflareError");

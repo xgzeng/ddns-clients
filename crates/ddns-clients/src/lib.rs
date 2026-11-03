@@ -8,7 +8,7 @@
 //! - A [`DynDnsClient`] wraps a provider, chosen by name, for one domain.
 //!
 //! ```no_run
-//! # async fn example() -> ddns_clients::Result<()> {
+//! # async fn example() -> anyhow::Result<()> {
 //! use ddns_clients::{DynDnsClient, providers, resolve};
 //!
 //! let mut client = DynDnsClient::provider(providers::CLOUDFLARE)?
@@ -31,12 +31,10 @@
 //! ```
 
 mod client;
-mod error;
 pub mod providers;
 pub mod resolve;
 
 pub use client::{DynDnsClient, DynDnsClientBuilder, UpdateSummary};
-pub use error::{Error, Result};
 pub use providers::DynDnsProvider;
 pub use providers::cloudflare::CloudflareProvider;
 pub use providers::noip::NoIpProvider;
