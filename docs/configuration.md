@@ -20,7 +20,7 @@ records, run `ddnsd dry-run`.
 ## Example
 
 ```toml
-interval = 300
+resolve_interval = 300
 ttl = 600
 resolvers = [
   { type = "icanhazip" },
@@ -47,16 +47,19 @@ otherwise read them as part of that table.
 
 | Setting | Default | |
 |---|---|---|
-| `interval` | `300` | Seconds between checks of the public addresses |
-| `refresh_interval` | `3600` | Seconds after which records are read again from the provider, warning about changes made elsewhere; `0` never does |
+| `tick` | `15` | Seconds between the daemon's checks. Each check looks up the public addresses once `resolve_interval` has passed, and updates the providers whose addresses changed or whose last update failed, unless the provider asked to wait; must not be `0` |
+| `resolve_interval` | `300` | Seconds between lookups of the public addresses, which happen at the first check after it |
 | `resolvers` | icanhazip, then local | How to find the public addresses, see [Resolvers](#resolvers); must not be empty |
-| `ipv4`, `ipv6`, `ttl`, `max_records`, `replace_only` | | Defaults for all providers, see [Record settings](#record-settings) |
+| `ipv4`, `ipv6` | `true` | Which public addresses are looked up, and defaults for all providers; a provider can't enable a family disabled here |
+| `ttl`, `max_records`, `replace_only`, `cache_expire` | | Defaults for all providers, see [Record settings](#record-settings) |
 
 ## Resolvers
 
 `resolvers` is a list of the ways to find this host's public addresses. They are
 tried in order, separately for IPv4 and IPv6, until one finds an address. The
-addresses are resolved once per check and pushed to all providers.
+addresses are resolved every `resolve_interval`, at the next `tick`, and pushed
+to all providers. A family whose lookup finds nothing keeps its last known
+addresses.
 
 | `type` | |
 |---|---|
@@ -146,7 +149,8 @@ Set at the top of the file they are defaults for all providers, and set in a
 | Setting | Default | |
 |---|---|---|
 | `ipv4` | `true` | Manage A records; if `false`, they are left alone |
-| `ipv6` | `true` | Manage AAAA records; if `false`, they are left alone. A provider must have one of `ipv4` and `ipv6` enabled |
+| `ipv6` | `true` | Manage AAAA records; if `false`, they are left alone. A provider must have one of `ipv4` and `ipv6` enabled, and can't enable one that is disabled at the top of the file |
 | `ttl` | `600` | TTL of created and changed records, in seconds; `0` uses the provider's default |
-| `max_records` | `2` | Maximum number of A and AAAA records kept for the domain; the addresses beyond it aren't added |
+| `max_records` | `2` | Maximum number of A and AAAA records kept for the domain; if more addresses are found, those that already have a record are kept first, and the rest aren't added |
 | `replace_only` | `false` | Only re-point existing records, never create or delete any, e.g. for records set up by hand |
+| `cache_expire` | `3600` | Seconds after which the records are read again from the provider, warning about changes made elsewhere; `0` never does |

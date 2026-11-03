@@ -23,6 +23,23 @@ struct Endpoint {
     url: String,
 }
 
+impl Endpoint {
+    /// The address the service echoes back.
+    async fn fetch(&self) -> Result<IpAddr> {
+        let url = &self.url;
+        self.client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?
+            .trim()
+            .parse()
+            .with_context(|| format!("{url} returned an invalid ip address"))
+    }
+}
+
 impl HttpResolver {
     /// Creates a resolver using `url`, on a host reachable over both families.
     ///
@@ -94,30 +111,30 @@ fn family_client(builder: reqwest::ClientBuilder, family: IpFamily) -> reqwest::
 
 #[async_trait]
 impl IpResolver for HttpResolver {
-    async fn resolve(&self, family: IpFamily) -> Result<Vec<IpAddr>> {
-        let endpoint = match family {
-            IpFamily::V4 => &self.ipv4,
-            IpFamily::V6 => &self.ipv6,
-        };
-        let Some(Endpoint { client, url }) = endpoint else {
+    async fn resolve_a(&self) -> Result<Vec<Ipv4Addr>> {
+        let Some(endpoint) = &self.ipv4 else {
             return Ok(vec![]);
         };
-
-        let addr = client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?
-            .trim()
-            .parse::<IpAddr>()
-            .with_context(|| format!("{url} returned an invalid ip address"))?;
-        if IpFamily::of(&addr) != family {
-            log::warn!("{url} returned {addr}, expected an {family:?} address");
-            return Ok(vec![]);
+        match endpoint.fetch().await? {
+            IpAddr::V4(addr) => Ok(vec![addr]),
+            addr => {
+                log::warn!("{} returned {addr}, expected an IPv4 address", endpoint.url);
+                Ok(vec![])
+            }
         }
-        Ok(vec![addr])
+    }
+
+    async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>> {
+        let Some(endpoint) = &self.ipv6 else {
+            return Ok(vec![]);
+        };
+        match endpoint.fetch().await? {
+            IpAddr::V6(addr) => Ok(vec![addr]),
+            addr => {
+                log::warn!("{} returned {addr}, expected an IPv6 address", endpoint.url);
+                Ok(vec![])
+            }
+        }
     }
 }
 
@@ -194,13 +211,10 @@ mod tests {
         ];
         for addrs in [addrs, [addrs[1], addrs[0]]] {
             let resolver = same_url_resolver(&addrs);
+            assert_eq!(resolver.resolve_a().await.unwrap(), [Ipv4Addr::LOCALHOST]);
             assert_eq!(
-                resolver.resolve(IpFamily::V4).await.unwrap(),
-                [LOCALHOST_V4]
-            );
-            assert_eq!(
-                resolver.resolve(IpFamily::V6).await.unwrap(),
-                [LOCALHOST_V6]
+                resolver.resolve_aaaa().await.unwrap(),
+                [Ipv6Addr::LOCALHOST]
             );
         }
     }
@@ -212,10 +226,7 @@ mod tests {
         tokio::spawn(echo_ip(listener));
 
         let resolver = same_url_resolver(&[addr]);
-        assert_eq!(
-            resolver.resolve(IpFamily::V4).await.unwrap(),
-            [LOCALHOST_V4]
-        );
-        resolver.resolve(IpFamily::V6).await.unwrap_err();
+        assert_eq!(resolver.resolve_a().await.unwrap(), [Ipv4Addr::LOCALHOST]);
+        resolver.resolve_aaaa().await.unwrap_err();
     }
 }

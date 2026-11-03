@@ -8,7 +8,6 @@ use plan::Operation;
 use crate::{
     CloudflareProvider, DynDnsProvider, NoIpProvider,
     providers::{CLOUDFLARE, NOIP},
-    resolve::IpFamily,
 };
 
 /// A dynamic DNS client managing the address records of one domain on one
@@ -38,9 +37,13 @@ use crate::{
 pub struct DynDnsClient {
     provider: Box<dyn DynDnsProvider>,
     ttl: Option<u32>,
-    /// Whether A (IPv4) and AAAA (IPv6) records are managed.
+    /// Whether A (IPv4) records are managed.
     ipv4: bool,
+    /// Whether AAAA (IPv6) records are managed.
     ipv6: bool,
+    /// Maximum number of records of the enabled families; `None` for no
+    /// limit.
+    max_records: Option<usize>,
     /// Only re-point existing records, never add or delete any.
     replace_only: bool,
     /// Plan and log the operations, but don't carry them out.
@@ -82,6 +85,7 @@ impl DynDnsClient {
             ttl: None,
             ipv4: true,
             ipv6: true,
+            max_records: None,
             replace_only: false,
             dry_run: false,
         }
@@ -105,6 +109,12 @@ impl DynDnsClient {
         self
     }
 
+    /// Maximum number of records; see [`DynDnsClientBuilder::max_records`].
+    pub fn max_records(mut self, max: Option<usize>) -> Self {
+        self.max_records = max;
+        self
+    }
+
     /// Only re-point existing records, so the number of records never
     /// changes; see [`DynDnsClientBuilder::replace_only`].
     pub fn replace_only(mut self, enabled: bool) -> Self {
@@ -119,11 +129,21 @@ impl DynDnsClient {
         self.dry_run = enabled;
     }
 
-    /// Whether records of `family` are managed.
-    pub fn is_enabled(&self, family: IpFamily) -> bool {
-        match family {
-            IpFamily::V4 => self.ipv4,
-            IpFamily::V6 => self.ipv6,
+    /// Whether A (IPv4) records are managed.
+    pub fn is_ipv4_enabled(&self) -> bool {
+        self.ipv4
+    }
+
+    /// Whether AAAA (IPv6) records are managed.
+    pub fn is_ipv6_enabled(&self) -> bool {
+        self.ipv6
+    }
+
+    /// Whether records with `ip`'s family are managed.
+    fn manages(&self, ip: &IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(_) => self.ipv4,
+            IpAddr::V6(_) => self.ipv6,
         }
     }
 
@@ -142,17 +162,17 @@ impl DynDnsClient {
     }
 
     /// Addresses of the domain's records of the enabled families. Providers
-    /// may answer from a cache; see [`refresh`](Self::refresh).
+    /// may answer from a cache; see [`refresh_cache`](Self::refresh_cache).
     pub async fn list(&mut self) -> Result<Vec<IpAddr>> {
         let mut records = self.provider.list().await?;
-        records.retain(|ip| self.is_enabled(IpFamily::of(ip)));
+        records.retain(|ip| self.manages(ip));
         Ok(records)
     }
 
     /// Makes the provider read the records again, e.g. after they were
     /// changed elsewhere.
-    pub async fn refresh(&mut self) -> Result<()> {
-        self.provider.refresh().await
+    pub async fn refresh_cache(&mut self) -> Result<()> {
+        self.provider.refresh_cache().await
     }
 
     /// Replaces the domain's records of the enabled families with `ips`:
@@ -164,8 +184,12 @@ impl DynDnsClient {
     /// surplus records keep their addresses, and addresses without a record
     /// to re-point are skipped (logged as a warning).
     ///
+    /// With [`max_records`](Self::max_records), at most that many of `ips`
+    /// are used: those that already have a record first, then the others in
+    /// order.
+    ///
     /// Nothing is changed if the records already equal `ips`. The records
-    /// may come from the provider's cache; call [`refresh`](Self::refresh) to
+    /// may come from the provider's cache; call [`refresh_cache`](Self::refresh_cache) to
     /// pick up changes made elsewhere.
     ///
     /// Empty `ips` remove all records of the enabled families.
@@ -177,15 +201,24 @@ impl DynDnsClient {
     }
 
     /// The operations that turn the `existing` records into `ips`, within
-    /// the enabled families and `replace_only`.
+    /// the enabled families, `max_records` and `replace_only`.
     fn plan(&self, existing: &[IpAddr], ips: impl IntoIterator<Item = IpAddr>) -> Vec<Operation> {
         let mut desired: Vec<IpAddr> = vec![];
         for ip in ips {
-            if !self.is_enabled(IpFamily::of(&ip)) {
+            if !self.manages(&ip) {
                 log::debug!("{}: ignoring {ip} of a disabled family", self.domain());
             } else if !desired.contains(&ip) {
                 desired.push(ip);
             }
+        }
+        if let Some(max) = self.max_records.filter(|&max| desired.len() > max) {
+            // a stable sort: addresses with a record first, each in order
+            desired.sort_by_key(|ip| !existing.contains(ip));
+            let ignored = desired.split_off(max);
+            log::debug!(
+                "{}: ignoring {ignored:?} beyond max_records = {max}",
+                self.domain()
+            );
         }
         let ops = plan::plan(existing, &desired, self.replace_only);
 
@@ -247,6 +280,7 @@ impl fmt::Debug for DynDnsClient {
             .field("ttl", &self.ttl)
             .field("ipv4", &self.ipv4)
             .field("ipv6", &self.ipv6)
+            .field("max_records", &self.max_records)
             .field("replace_only", &self.replace_only)
             .field("dry_run", &self.dry_run)
             .finish_non_exhaustive()
@@ -279,8 +313,8 @@ impl Kind {
 ///
 /// | Provider | Required | Optional |
 /// |---|---|---|
-/// | `cloudflare` | `api_token`, `zone`, `domain` | `ttl`, `enable_ipv4`, `enable_ipv6`, `replace_only` |
-/// | `noip` | `username`, `password`, `domain` | `user_agent`, `ttl`, `enable_ipv4`, `enable_ipv6`, `replace_only` |
+/// | `cloudflare` | `api_token`, `zone`, `domain` | `ttl`, `enable_ipv4`, `enable_ipv6`, `max_records`, `replace_only` |
+/// | `noip` | `username`, `password`, `domain` | `user_agent`, `ttl`, `enable_ipv4`, `enable_ipv6`, `max_records`, `replace_only` |
 ///
 /// [`build`](Self::build) rejects missing (or empty) required parameters,
 /// parameters the provider doesn't use, and disabling both families.
@@ -296,6 +330,7 @@ pub struct DynDnsClientBuilder {
     ttl: Option<u32>,
     ipv4: bool,
     ipv6: bool,
+    max_records: Option<usize>,
     replace_only: bool,
 }
 
@@ -312,6 +347,7 @@ impl DynDnsClientBuilder {
             ttl: None,
             ipv4: true,
             ipv6: true,
+            max_records: None,
             replace_only: false,
         }
     }
@@ -373,6 +409,15 @@ impl DynDnsClientBuilder {
         self
     }
 
+    /// Maximum number of records of the enabled families; `None` (the
+    /// default) for no limit. If an update has more addresses, those that
+    /// already have a record are kept first, then the others are used in
+    /// order; the rest are ignored.
+    pub fn max_records(mut self, max: Option<usize>) -> Self {
+        self.max_records = max;
+        self
+    }
+
     /// Only re-point existing records, never create or delete any, so the
     /// number of records on the provider never changes (default `false`).
     /// Useful when the records are set up by hand, e.g. with provider-side
@@ -410,6 +455,7 @@ impl DynDnsClientBuilder {
             ttl: self.ttl,
             ipv4: self.ipv4,
             ipv6: self.ipv6,
+            max_records: self.max_records,
             replace_only: self.replace_only,
             dry_run: false,
         })
@@ -539,7 +585,7 @@ mod tests {
             Ok(self.state().records.clone())
         }
 
-        async fn refresh(&mut self) -> Result<()> {
+        async fn refresh_cache(&mut self) -> Result<()> {
             self.state().refreshes += 1;
             Ok(())
         }
@@ -687,8 +733,8 @@ mod tests {
     async fn disabled_family_is_left_alone() {
         let fake = Fake::with(&[ip("192.0.2.9"), ip("2001:db8::9")]);
         let mut client = DynDnsClient::new(fake.clone()).enable_ipv6(false);
-        assert!(client.is_enabled(IpFamily::V4));
-        assert!(!client.is_enabled(IpFamily::V6));
+        assert!(client.is_ipv4_enabled());
+        assert!(!client.is_ipv6_enabled());
 
         assert_eq!(client.list().await.unwrap(), vec![ip("192.0.2.9")]);
 
@@ -731,6 +777,29 @@ mod tests {
         let summary = client.update([ip("192.0.2.1")]).await.unwrap();
         assert!(summary.is_unchanged());
         assert!(fake.state().ops.is_empty());
+    }
+
+    #[tokio::test]
+    async fn max_records_prefers_existing() {
+        let fake = Fake::with(&[ip("192.0.2.9"), ip("192.0.2.3")]);
+        let mut client = DynDnsClient::new(fake.clone()).max_records(Some(2));
+
+        // 192.0.2.3 keeps its record; 192.0.2.1 is first of the others
+        let summary = client
+            .update([ip("192.0.2.1"), ip("192.0.2.2"), ip("192.0.2.3")])
+            .await
+            .unwrap();
+        assert_eq!(summary.kept, 1);
+        assert_eq!(summary.updated, 1);
+        assert_eq!(fake.state().records, vec![ip("192.0.2.1"), ip("192.0.2.3")]);
+
+        // within the limit, nothing is ignored
+        let mut client = DynDnsClient::new(fake.clone()).max_records(Some(3));
+        client
+            .update([ip("192.0.2.1"), ip("192.0.2.2"), ip("192.0.2.3")])
+            .await
+            .unwrap();
+        assert_eq!(fake.state().records.len(), 3);
     }
 
     #[tokio::test]
@@ -780,7 +849,7 @@ mod tests {
         let fake = Fake::default();
         let mut client = DynDnsClient::new(fake.clone());
         assert_eq!(client.domain(), DOMAIN);
-        client.refresh().await.unwrap();
+        client.refresh_cache().await.unwrap();
         assert_eq!(fake.state().refreshes, 1);
     }
 }

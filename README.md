@@ -68,15 +68,18 @@ To build from source, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 ### Resolving the public IP
 
 ```rust
-use ddns_clients::resolve::{self, IpFamily};
+use ddns_clients::{IpResolver, resolve};
 
-let resolvers = resolve::default_resolvers(); // icanhazip, then local interfaces
-let ips = resolve::resolve_public_ips(&resolvers, &[IpFamily::V4, IpFamily::V6]).await;
+let resolvers = resolve::default_resolvers();  // icanhazip, then local interfaces
+let ipv4 = resolvers.resolve_a().await?;       // Vec<Ipv4Addr>
+let ipv6 = resolvers.resolve_aaaa().await.unwrap_or_default(); // none without IPv6
 ```
 
 ### Updating DNS records
 
 ```rust
+use std::net::IpAddr;
+
 use ddns_clients::DynDnsClient;
 
 let mut client = DynDnsClient::provider("cloudflare")?
@@ -84,6 +87,7 @@ let mut client = DynDnsClient::provider("cloudflare")?
     .zone("example.com")
     .domain("myhost.example.com")
     .build()?;
+let ips = ipv4.into_iter().map(IpAddr::from).chain(ipv6.into_iter().map(IpAddr::from));
 client.update(ips).await?; // replaces the domain's A/AAAA records
 ```
 
@@ -112,7 +116,9 @@ domain = "home.example.com"
 
 See [docs/configuration.md](docs/configuration.md) for all settings.
 
-After server errors the daemon waits as long as the provider asks (30 minutes
-for No-IP) before updating that provider again.
+Failed updates are retried every `tick` (15 seconds by default). After server
+errors or rate limiting the daemon waits as long as the provider asks (30
+minutes for No-IP), and a provider that rejects the credentials isn't updated
+again until ddnsd is restarted.
 
 Log level is controlled with `RUST_LOG` (default `info`).

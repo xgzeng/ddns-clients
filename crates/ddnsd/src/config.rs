@@ -30,6 +30,7 @@ pub struct ProviderConfig {
     pub ttl: Option<u32>,
     pub max_records: Option<usize>,
     pub replace_only: Option<bool>,
+    pub cache_expire: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
@@ -84,19 +85,24 @@ impl ResolverConfig {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Default for providers that don't set it.
+    /// Whether public IPv4 addresses are looked up; default for providers
+    /// that don't set it, which can't enable it if this doesn't.
     #[serde(default = "yes")]
     pub ipv4: bool,
-    /// Default for providers that don't set it.
+    /// Like `ipv4`, for IPv6.
     #[serde(default = "yes")]
     pub ipv6: bool,
-    /// Check interval in seconds.
-    #[serde(default = "default_check_interval")]
-    pub interval: u64,
-    /// Seconds after which providers read their records again, to notice
-    /// changes made outside ddnsd; 0 never does.
-    #[serde(default = "default_refresh_interval")]
-    pub refresh_interval: u64,
+    /// Seconds between lookups of the public addresses.
+    #[serde(default = "default_resolve_interval")]
+    pub resolve_interval: u64,
+    /// Seconds between the daemon's checks, which retry failed updates and
+    /// look up the addresses once `resolve_interval` has passed.
+    #[serde(default = "default_tick")]
+    pub tick: u64,
+    /// Default for providers that don't set it: seconds after which they read
+    /// their records again, to notice changes made outside ddnsd; 0 never.
+    #[serde(default = "default_cache_expire")]
+    pub cache_expire: u64,
     /// Default for providers that don't set it; 0 means the provider's default.
     #[serde(default = "default_ttl")]
     pub ttl: u32,
@@ -193,7 +199,8 @@ fn check_domain_name(name: &str, wildcard: bool) -> Result<()> {
 pub struct Target {
     pub name: String,
     pub client: DynDnsClient,
-    pub max_records: usize,
+    /// How often the provider reads its records again; `None` never.
+    pub cache_expire: Option<Duration>,
 }
 
 impl Config {
@@ -205,6 +212,9 @@ impl Config {
         }
 
         let mut config: Config = toml::from_str(&fs::read_to_string(path)?)?;
+        if config.tick == 0 {
+            bail!("tick must not be 0");
+        }
         if config.resolvers.is_empty() {
             bail!("resolvers must not be empty");
         }
@@ -224,19 +234,20 @@ impl Config {
     }
 
     /// Creates a client for each provider; fails if a provider type is
-    /// unknown, its parameters are missing or unused, or both address
-    /// families are disabled.
+    /// unknown, its parameters are missing or unused, both address families
+    /// are disabled, or it enables a family disabled at the top level.
     pub fn targets(&self) -> Result<Vec<Target>> {
         self.provider
             .iter()
             .map(|(name, provider)| {
                 let client = self
-                    .client(name, provider)
+                    .check_families(provider)
+                    .and_then(|()| self.client(name, provider))
                     .with_context(|| format!("provider {name}"))?;
                 Ok(Target {
                     name: name.clone(),
                     client,
-                    max_records: provider.max_records.unwrap_or(self.max_records),
+                    cache_expire: self.cache_expire(provider),
                 })
             })
             .collect()
@@ -266,8 +277,24 @@ impl Config {
             .ttl(self.ttl(provider))
             .enable_ipv4(provider.ipv4.unwrap_or(self.ipv4))
             .enable_ipv6(provider.ipv6.unwrap_or(self.ipv6))
+            .max_records(Some(provider.max_records.unwrap_or(self.max_records)))
             .replace_only(provider.replace_only.unwrap_or(self.replace_only))
             .build()
+    }
+
+    /// Fails if `provider` enables a family whose addresses aren't looked up,
+    /// as its records would be removed.
+    fn check_families(&self, provider: &ProviderConfig) -> Result<()> {
+        let families = [
+            ("ipv4", provider.ipv4, self.ipv4),
+            ("ipv6", provider.ipv6, self.ipv6),
+        ];
+        for (family, enabled, looked_up) in families {
+            if enabled == Some(true) && !looked_up {
+                bail!("{family} is enabled, but disabled at the top level");
+            }
+        }
+        Ok(())
     }
 
     /// The TTL for `provider`'s records; `None` (configured as 0) uses the
@@ -277,9 +304,11 @@ impl Config {
         (ttl != 0).then_some(ttl)
     }
 
-    /// How often providers read their records again; `None` never.
-    pub fn refresh_interval(&self) -> Option<Duration> {
-        (self.refresh_interval != 0).then(|| Duration::from_secs(self.refresh_interval))
+    /// How often `provider` reads its records again; `None` (configured as 0)
+    /// never.
+    fn cache_expire(&self, provider: &ProviderConfig) -> Option<Duration> {
+        let secs = provider.cache_expire.unwrap_or(self.cache_expire);
+        (secs != 0).then(|| Duration::from_secs(secs))
     }
 
     pub fn resolvers(&self) -> Vec<AnyResolver> {
@@ -291,11 +320,15 @@ fn yes() -> bool {
     true
 }
 
-fn default_check_interval() -> u64 {
+fn default_tick() -> u64 {
+    15
+}
+
+fn default_resolve_interval() -> u64 {
     300
 }
 
-fn default_refresh_interval() -> u64 {
+fn default_cache_expire() -> u64 {
     3600
 }
 
@@ -318,8 +351,6 @@ fn default_resolvers() -> Vec<ResolverConfig> {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-
-    use ddns_clients::resolve::IpFamily;
 
     use super::*;
 
@@ -348,9 +379,9 @@ zone = "example.com"
         let config = load(
             "full",
             r#"
-ipv4 = false
-interval = 60
-refresh_interval = 0
+resolve_interval = 60
+tick = 5
+cache_expire = 0
 ttl = 0
 max_records = 4
 replace_only = true
@@ -364,22 +395,23 @@ type = "cloudflare"
 api_token = "secret"
 zone = "example.com"
 domain = "myhost.example.com"
+ipv4 = false
 
 [provider.noip]
 username = "me@example.com"
 password = "secret"
 user_agent = "Example ddnsd/1.0 admin@example.com"
 domain = "myhost.ddns.net"
-ipv4 = true
 ipv6 = false
 ttl = 60
 max_records = 1
 replace_only = false
+cache_expire = 600
 "#,
         )
         .unwrap();
-        assert_eq!(config.interval, 60);
-        assert_eq!(config.refresh_interval(), None);
+        assert_eq!(config.resolve_interval, 60);
+        assert_eq!(config.tick, 5);
         assert_eq!(
             config.resolvers,
             vec![
@@ -399,24 +431,26 @@ replace_only = false
         assert_eq!(home.name, "home");
         assert_eq!(home.client.domain(), "myhost.example.com");
         assert_eq!(config.ttl(&config.provider["home"]), None);
-        assert!(!home.client.is_enabled(IpFamily::V4));
-        assert!(home.client.is_enabled(IpFamily::V6));
-        assert_eq!(home.max_records, 4);
+        assert!(!home.client.is_ipv4_enabled());
+        assert!(home.client.is_ipv6_enabled());
+        assert!(format!("{:?}", home.client).contains("max_records: Some(4)"));
+        assert_eq!(home.cache_expire, None);
         assert!(format!("{:?}", home.client).contains("replace_only: true"));
         assert_eq!(noip.name, "noip");
         assert_eq!(noip.client.domain(), "myhost.ddns.net");
         assert_eq!(config.ttl(&config.provider["noip"]), Some(60));
-        assert!(noip.client.is_enabled(IpFamily::V4));
-        assert!(!noip.client.is_enabled(IpFamily::V6));
-        assert_eq!(noip.max_records, 1);
+        assert!(noip.client.is_ipv4_enabled());
+        assert!(!noip.client.is_ipv6_enabled());
+        assert!(format!("{:?}", noip.client).contains("max_records: Some(1)"));
+        assert_eq!(noip.cache_expire, Some(Duration::from_secs(600)));
         assert!(format!("{:?}", noip.client).contains("replace_only: false"));
     }
 
     #[test]
     fn defaults() {
         let config = load("defaults", MINIMAL).unwrap();
-        assert_eq!(config.interval, 300);
-        assert_eq!(config.refresh_interval(), Some(Duration::from_secs(3600)));
+        assert_eq!(config.resolve_interval, 300);
+        assert_eq!(config.tick, 15);
         assert_eq!(config.resolvers, default_resolvers());
 
         let targets = config.targets().unwrap();
@@ -429,9 +463,10 @@ replace_only = false
             format!("{}.example.com", hostname.to_string_lossy())
         );
         assert_eq!(config.ttl(&config.provider["cloudflare"]), Some(600));
-        assert!(target.client.is_enabled(IpFamily::V4));
-        assert!(target.client.is_enabled(IpFamily::V6));
-        assert_eq!(target.max_records, 2);
+        assert!(target.client.is_ipv4_enabled());
+        assert!(target.client.is_ipv6_enabled());
+        assert!(format!("{:?}", target.client).contains("max_records: Some(2)"));
+        assert_eq!(target.cache_expire, Some(Duration::from_secs(3600)));
         assert!(format!("{:?}", target.client).contains("replace_only: false"));
     }
 
@@ -617,8 +652,14 @@ replace_only = false
     }
 
     #[test]
+    fn rejects_zero_tick() {
+        let err = load("zerotick", &format!("tick = 0\n{MINIMAL}")).unwrap_err();
+        assert_eq!(err.to_string(), "tick must not be 0");
+    }
+
+    #[test]
     fn rejects_no_provider() {
-        let err = load("noprovider", "interval = 60\n").unwrap_err();
+        let err = load("noprovider", "resolve_interval = 60\n").unwrap_err();
         assert!(err.to_string().contains("no provider configured"), "{err}");
     }
 
@@ -637,11 +678,22 @@ replace_only = false
     }
 
     #[test]
+    fn rejects_family_disabled_at_top_level() {
+        let config = load("v6off", &format!("ipv6 = false\n{MINIMAL}ipv6 = true\n")).unwrap();
+        assert!(config.ipv4 && !config.ipv6);
+        let err = config.targets().err().unwrap();
+        assert_eq!(
+            format!("{err:#}"),
+            "provider cloudflare: ipv6 is enabled, but disabled at the top level"
+        );
+    }
+
+    #[test]
     fn rejects_top_level_key_after_provider_table() {
         // belongs to [provider.cloudflare] in TOML, not to the top level
-        let err = load("keyorder", &format!("{MINIMAL}interval = 60\n")).unwrap_err();
+        let err = load("keyorder", &format!("{MINIMAL}resolve_interval = 60\n")).unwrap_err();
         assert!(
-            err.to_string().contains("unknown field `interval`"),
+            err.to_string().contains("unknown field `resolve_interval`"),
             "{err}"
         );
     }

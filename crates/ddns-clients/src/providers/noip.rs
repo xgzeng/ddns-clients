@@ -32,7 +32,7 @@ const DEFAULT_USER_AGENT: &str = concat!("ddns-clients ddns-clients/", env!("CAR
 ///   answers, e.g. for a domain they don't serve, they are read through the
 ///   system resolver, whose answer may be cached or overridden. They are
 ///   cached, together with the addresses set by updates, until
-///   [`refresh`](DynDnsProvider::refresh) or a failed update.
+///   [`refresh_cache`](DynDnsProvider::refresh_cache) or a failed update.
 /// - The TTL of an update is ignored.
 /// - After a failed update, [`next_allowed_update`](DynDnsProvider::next_allowed_update)
 ///   is 30 minutes away for server errors and [`NEVER`] away for errors that
@@ -286,9 +286,13 @@ impl DynDnsProvider for NoIpProvider {
         self.addresses().await
     }
 
-    async fn refresh(&mut self) -> Result<()> {
-        self.known = None;
-        self.addresses().await.map(drop)
+    async fn refresh_cache(&mut self) -> Result<()> {
+        let cached = self.known.take();
+        let current = self.addresses().await?;
+        if let Some(cached) = cached {
+            super::warn_if_changed(&self.hostname, &cached, &current);
+        }
+        Ok(())
     }
 
     /// Sets the hostname's address of `ip`'s family; fails if it already

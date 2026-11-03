@@ -1,3 +1,25 @@
+ddns-clients (0.0.4) unstable; urgency=medium
+
+  * Renamed settings: interval is now resolve_interval, and refresh_interval
+    is now cache_expire, which can also be set per provider. Configs using
+    the old names fail to load.
+  * New tick setting (default 15 seconds): failed updates are retried at the
+    next tick, and the public addresses are looked up at the first tick
+    after resolve_interval, whatever the providers' state.
+  * The top-level ipv4 and ipv6 settings decide which public addresses are
+    looked up; a provider can't enable a family disabled there.
+  * A family whose lookup finds nothing keeps its last known addresses, so a
+    failed lookup no longer removes its records.
+  * max_records keeps the addresses that already have a record first.
+  * A provider that rejects the credentials is no longer updated until ddnsd
+    is restarted; the others keep running. After server errors or rate
+    limiting, No-IP (30 minutes) and Cloudflare (1 to 5 minutes) are given
+    time before the next update.
+  * Changes of the public addresses are logged, and so is a domain found up
+    to date.
+
+ -- XiaoGuang Zeng <xgzeng@gmail.com>  Tue, 03 Nov 2026 02:10:59 -0500
+
 ddns-clients (0.0.3) unstable; urgency=medium
 
   * New OpenWrt packages for OpenWrt 25.12 and later.

@@ -1,16 +1,24 @@
 //! [Cloudflare](https://www.cloudflare.com/) DNS provider, using the
 //! [v4 REST API](https://developers.cloudflare.com/api/) directly.
 
-use std::{fmt, net::IpAddr};
+use std::{
+    fmt,
+    net::IpAddr,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use reqwest::RequestBuilder;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::DynDnsProvider;
+use super::{DynDnsProvider, NEVER};
 
 const BASE_URL: &str = "https://api.cloudflare.com/client/v4";
+/// Wait after being rate limited; Cloudflare's limit is per 5 minutes.
+const RATE_LIMITED_WAIT: Duration = Duration::from_secs(5 * 60);
+/// Wait after a server error.
+const SERVER_ERROR_WAIT: Duration = Duration::from_secs(60);
 
 /// Manages the A/AAAA records of one domain in a Cloudflare zone, using an
 /// API token.
@@ -19,6 +27,11 @@ const BASE_URL: &str = "https://api.cloudflare.com/client/v4";
 /// ids are cached after the first [`list`](DynDnsProvider::list), so
 /// re-pointing and deleting a record takes one request; a cache that no
 /// longer matches the zone is read again.
+///
+/// After a rejected request, [`next_allowed_update`](DynDnsProvider::next_allowed_update)
+/// is 1 minute away for server errors, 5 minutes away when rate limited, and
+/// [`NEVER`] away when the token is rejected or the zone isn't found, which
+/// need the configuration fixed.
 pub struct CloudflareProvider {
     client: reqwest::Client,
     api_token: String,
@@ -27,6 +40,8 @@ pub struct CloudflareProvider {
     domain: String,
     /// Ids and addresses of the domain's A/AAAA records, if known.
     records: Option<Vec<(String, IpAddr)>>,
+    /// No request before this time, after a rejected one.
+    next_update: Option<Instant>,
 }
 
 /// An error response from the Cloudflare API.
@@ -59,6 +74,20 @@ impl fmt::Display for CloudflareError {
 }
 
 impl std::error::Error for CloudflareError {}
+
+impl CloudflareError {
+    /// How long to wait before the next request after this error. Other
+    /// client errors, e.g. a record that no longer exists, may go away once
+    /// the records are read again, so they don't wait.
+    fn retry_after(&self) -> Option<Duration> {
+        match self.status {
+            401 | 403 => Some(NEVER),
+            429 => Some(RATE_LIMITED_WAIT),
+            500..=599 => Some(SERVER_ERROR_WAIT),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct Envelope<T> {
@@ -174,14 +203,22 @@ impl CloudflareProvider {
             zone_id: None,
             domain: domain.into(),
             records: None,
+            next_update: None,
         })
     }
 
-    async fn call<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T> {
+    /// Sends `request`, and remembers when the next one may be sent if the
+    /// API rejects it.
+    async fn call<T: DeserializeOwned>(&mut self, request: RequestBuilder) -> Result<T> {
         let response = request.bearer_auth(&self.api_token).send().await?;
         let status = response.status().as_u16();
         let body = response.text().await?;
-        Ok(parse_response(status, &body)?)
+        let result = parse_response(status, &body);
+        self.next_update = match &result {
+            Ok(_) => None,
+            Err(err) => err.retry_after().map(|wait| Instant::now() + wait),
+        };
+        Ok(result?)
     }
 
     async fn zone_id(&mut self) -> Result<String> {
@@ -195,6 +232,8 @@ impl CloudflareProvider {
             .query(&[("name", &self.zone_name)]);
         let zones: Vec<Zone> = self.call(request).await?;
         let Some(zone) = zones.into_iter().next() else {
+            // or the token can't read it; either needs the configuration fixed
+            self.next_update = Some(Instant::now() + NEVER);
             bail!("zone {:?} not found", self.zone_name);
         };
         self.zone_id = Some(zone.id.clone());
@@ -246,6 +285,10 @@ impl DynDnsProvider for CloudflareProvider {
         &self.domain
     }
 
+    fn next_allowed_update(&self) -> Option<Instant> {
+        self.next_update
+    }
+
     async fn list(&mut self) -> Result<Vec<IpAddr>> {
         let records = match &self.records {
             Some(records) => records.clone(),
@@ -254,8 +297,16 @@ impl DynDnsProvider for CloudflareProvider {
         Ok(records.into_iter().map(|(_, ip)| ip).collect())
     }
 
-    async fn refresh(&mut self) -> Result<()> {
-        self.fetch().await.map(drop)
+    async fn refresh_cache(&mut self) -> Result<()> {
+        let ips = |records: &[(String, IpAddr)]| -> Vec<IpAddr> {
+            records.iter().map(|(_, ip)| *ip).collect()
+        };
+        let cached = self.records.as_deref().map(ips);
+        let records = self.fetch().await?;
+        if let Some(cached) = cached {
+            super::warn_if_changed(&self.domain, &cached, &ips(&records));
+        }
+        Ok(())
     }
 
     async fn add(&mut self, ip: IpAddr, ttl: Option<u32>) -> Result<()> {
@@ -342,6 +393,24 @@ mod tests {
     fn parse_error_status() {
         let body = r#"{"success":true,"errors":[],"result":[]}"#;
         assert!(parse_response::<Vec<Zone>>(500, body).is_err());
+    }
+
+    #[test]
+    fn retry_after() {
+        let retry_after = |status| {
+            CloudflareError {
+                status,
+                errors: vec![],
+            }
+            .retry_after()
+        };
+        assert_eq!(retry_after(401), Some(NEVER));
+        assert_eq!(retry_after(403), Some(NEVER));
+        assert_eq!(retry_after(429), Some(RATE_LIMITED_WAIT));
+        assert_eq!(retry_after(500), Some(SERVER_ERROR_WAIT));
+        assert_eq!(retry_after(502), Some(SERVER_ERROR_WAIT));
+        assert_eq!(retry_after(400), None);
+        assert_eq!(retry_after(404), None);
     }
 
     #[test]

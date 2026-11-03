@@ -32,6 +32,22 @@ use async_trait::async_trait;
 /// bad credentials are fixed.
 pub const NEVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
 
+/// Logs a warning if the addresses of `domain`'s records just read differ
+/// from the `cached` ones, in any order, i.e. they were changed elsewhere.
+/// Returns whether they did.
+fn warn_if_changed(domain: &str, cached: &[IpAddr], current: &[IpAddr]) -> bool {
+    let (mut cached, mut current) = (cached.to_vec(), current.to_vec());
+    cached.sort();
+    current.sort();
+    if cached == current {
+        return false;
+    }
+    log::warn!(
+        "{domain}: records changed outside this client: expected {cached:?}, found {current:?}"
+    );
+    true
+}
+
 /// The address records of one domain on a DNS service.
 ///
 /// A provider is created for a single domain. Records are identified by
@@ -39,7 +55,7 @@ pub const NEVER: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
 /// each operation acts on one of them.
 ///
 /// Implementations may cache records between calls, so [`list`](Self::list)
-/// may answer from the cache and [`refresh`](Self::refresh) reads them again.
+/// may answer from the cache and [`refresh_cache`](Self::refresh_cache) reads them again.
 /// The cache must follow the provider's own operations, and be dropped when
 /// an operation fails.
 ///
@@ -62,9 +78,10 @@ pub trait DynDnsProvider: Send {
     /// Addresses of all A and AAAA records, one per record; possibly cached.
     async fn list(&mut self) -> Result<Vec<IpAddr>>;
 
-    /// Drops cached records and reads them again from the service. The
-    /// default does nothing, for providers that don't cache.
-    async fn refresh(&mut self) -> Result<()> {
+    /// Drops cached records and reads them again from the service, logging a
+    /// warning if they differ from the cached ones, i.e. they were changed
+    /// elsewhere. The default does nothing, for providers that don't cache.
+    async fn refresh_cache(&mut self) -> Result<()> {
         Ok(())
     }
 
@@ -78,4 +95,19 @@ pub trait DynDnsProvider: Send {
 
     /// Deletes a record with `ip`.
     async fn delete(&mut self, ip: IpAddr) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_changed_records() {
+        let ip = |s: &str| -> IpAddr { s.parse().unwrap() };
+        let (a, b) = (ip("192.0.2.1"), ip("2001:db8::1"));
+        assert!(!warn_if_changed("h.example.com", &[a, b], &[b, a]));
+        assert!(warn_if_changed("h.example.com", &[a], &[b]));
+        assert!(warn_if_changed("h.example.com", &[a], &[a, b]));
+        assert!(warn_if_changed("h.example.com", &[a, b], &[]));
+    }
 }

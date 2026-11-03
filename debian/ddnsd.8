@@ -1,4 +1,4 @@
-.TH DDNSD 8 "November 2026" "ddnsd 0.0.3" "System Administration"
+.TH DDNSD 8 "November 2026" "ddnsd 0.0.4" "System Administration"
 .SH NAME
 ddnsd \- dynamic DNS daemon
 .SH SYNOPSIS
@@ -21,8 +21,11 @@ configured order for each address family.
 .PP
 When a provider rejects an update in a way that needs the configuration to be
 fixed, such as invalid credentials, the daemon stops updating that provider
-until it is restarted after fixing the configuration. After server errors it
-waits as long as the provider asks.
+until it is restarted after fixing the configuration. After server errors or
+rate limiting it waits as long as the provider asks; other failed updates are
+retried at the next check, every
+.B tick
+seconds.
 .SH COMMANDS
 .TP
 .B dry\-run

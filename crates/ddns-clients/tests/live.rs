@@ -70,14 +70,14 @@ mod cloudflare {
     async fn sorted_ips(provider: &mut CloudflareProvider) -> Result<(Vec<IpAddr>, Vec<IpAddr>)> {
         let mut cached = provider.list().await?;
         cached.sort();
-        provider.refresh().await?;
+        provider.refresh_cache().await?;
         let mut actual = provider.list().await?;
         actual.sort();
         Ok((cached, actual))
     }
 
     async fn delete_all_records(provider: &mut CloudflareProvider) -> Result<()> {
-        provider.refresh().await?;
+        provider.refresh_cache().await?;
         for ip in provider.list().await? {
             provider.delete(ip).await?;
         }

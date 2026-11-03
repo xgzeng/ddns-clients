@@ -8,7 +8,7 @@ use netlink_packet_route::{
     address::{AddressAttribute, AddressScope},
 };
 
-use super::{IpFamily, IpResolver};
+use super::IpResolver;
 
 /// Resolves addresses assigned to local interfaces via netlink.
 ///
@@ -20,56 +20,75 @@ pub struct LocalResolver;
 
 #[async_trait]
 impl IpResolver for LocalResolver {
-    async fn resolve(&self, family: IpFamily) -> Result<Vec<IpAddr>> {
-        let (conn, handle, _) = rtnetlink::new_connection().context("open netlink socket")?;
-        // Spawn the `Connection` so that it starts polling the netlink socket in the background.
-        tokio::spawn(conn);
+    async fn resolve_a(&self) -> Result<Vec<Ipv4Addr>> {
+        let addrs = global_addrs(AddressFamily::Inet).await?;
+        Ok(addrs
+            .into_iter()
+            .filter_map(|addr| match addr {
+                IpAddr::V4(addr) => Some(addr),
+                IpAddr::V6(_) => None,
+            })
+            .collect())
+    }
 
-        let wanted_family = match family {
-            IpFamily::V4 => AddressFamily::Inet,
-            IpFamily::V6 => AddressFamily::Inet6,
-        };
+    async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>> {
+        let addrs = global_addrs(AddressFamily::Inet6).await?;
+        Ok(addrs
+            .into_iter()
+            .filter_map(|addr| match addr {
+                IpAddr::V6(addr) => Some(addr),
+                IpAddr::V4(_) => None,
+            })
+            .collect())
+    }
+}
 
-        let mut stream = handle.address().get().execute();
-        let mut addrs = vec![];
+/// The global, non-deprecated addresses of `wanted_family` on local
+/// interfaces.
+async fn global_addrs(wanted_family: AddressFamily) -> Result<Vec<IpAddr>> {
+    let (conn, handle, _) = rtnetlink::new_connection().context("open netlink socket")?;
+    // Spawn the `Connection` so that it starts polling the netlink socket in the background.
+    tokio::spawn(conn);
 
-        while let Some(addr_msg) = stream.try_next().await.context("netlink request failed")? {
-            if addr_msg.header.family != wanted_family {
-                continue;
-            }
+    let mut stream = handle.address().get().execute();
+    let mut addrs = vec![];
 
-            let addr = addr_msg.attributes.iter().find_map(|attr| match attr {
-                AddressAttribute::Address(addr) => Some(*addr),
-                _ => None,
-            });
-            let Some(addr) = addr else {
-                continue;
-            };
-
-            if addr_msg.header.scope != AddressScope::Universe {
-                log::debug!("non-global address {addr}, skipping");
-                continue;
-            }
-
-            if !is_global(&addr) {
-                log::debug!("non-public address {addr}, skipping");
-                continue;
-            }
-
-            let cache_info = addr_msg.attributes.iter().find_map(|attr| match attr {
-                AddressAttribute::CacheInfo(cache_info) => Some(cache_info),
-                _ => None,
-            });
-            if cache_info.is_some_and(|info| info.ifa_preferred == 0 || info.ifa_valid == 0) {
-                log::debug!("address {addr} is deprecated, skipping");
-                continue;
-            }
-
-            addrs.push(addr);
+    while let Some(addr_msg) = stream.try_next().await.context("netlink request failed")? {
+        if addr_msg.header.family != wanted_family {
+            continue;
         }
 
-        Ok(addrs)
+        let addr = addr_msg.attributes.iter().find_map(|attr| match attr {
+            AddressAttribute::Address(addr) => Some(*addr),
+            _ => None,
+        });
+        let Some(addr) = addr else {
+            continue;
+        };
+
+        if addr_msg.header.scope != AddressScope::Universe {
+            log::debug!("non-global address {addr}, skipping");
+            continue;
+        }
+
+        if !is_global(&addr) {
+            log::debug!("non-public address {addr}, skipping");
+            continue;
+        }
+
+        let cache_info = addr_msg.attributes.iter().find_map(|attr| match attr {
+            AddressAttribute::CacheInfo(cache_info) => Some(cache_info),
+            _ => None,
+        });
+        if cache_info.is_some_and(|info| info.ifa_preferred == 0 || info.ifa_valid == 0) {
+            log::debug!("address {addr} is deprecated, skipping");
+            continue;
+        }
+
+        addrs.push(addr);
     }
+
+    Ok(addrs)
 }
 
 /// Whether `addr` is publicly routable, i.e. worth publishing in DNS.

@@ -5,21 +5,25 @@
 #
 # Top-level settings must come before the first [provider.<name>] table.
 
-interval = 300                 # seconds between checks, default 300
-refresh_interval = 3600        # seconds after which records are read again from the
-                               # provider, warning about changes made elsewhere;
-                               # 0 = never; default 3600
+tick = 15                      # seconds between checks, which retry failed
+                               # updates; default 15
+resolve_interval = 300         # seconds between public ip lookups, default 300
 resolvers = [                  # tried in order per family; default: icanhazip, local
   { type = "icanhazip" },
   { type = "local" },          # global addresses of local interfaces
 ]
 # defaults for all providers, each can override them
-ipv4 = true                    # default true
-ipv6 = true                    # default true
+ipv4 = true                    # look up IPv4 addresses, and the default for
+                               # providers, which can't enable it if false;
+                               # default true
+ipv6 = true                    # the same for IPv6; default true
 ttl = 600                      # 0 = provider default; default 600
 max_records = 2                # max A/AAAA records kept, default 2
 replace_only = false           # only re-point existing records, never create or
                                # delete any; default false
+cache_expire = 3600            # seconds after which records are read again from the
+                               # provider, warning about changes made elsewhere;
+                               # 0 = never; default 3600
 
 # One table per provider. `type` defaults to the name after "provider.", so
 # [provider.cloudflare] needs no type; several entries of the same type need

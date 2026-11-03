@@ -9,7 +9,9 @@
 //!
 //! ```no_run
 //! # async fn example() -> anyhow::Result<()> {
-//! use ddns_clients::{DynDnsClient, providers, resolve};
+//! use std::net::IpAddr;
+//!
+//! use ddns_clients::{DynDnsClient, IpResolver, providers, resolve};
 //!
 //! let mut client = DynDnsClient::provider(providers::CLOUDFLARE)?
 //!     .api_token("api-token")
@@ -18,14 +20,13 @@
 //!     .ttl(Some(300))
 //!     .build()?;
 //! let resolvers = resolve::default_resolvers();
-//! let families = [resolve::IpFamily::V4, resolve::IpFamily::V6];
-//! let ips = resolve::resolve_public_ips(&resolvers, &families).await;
+//! let ipv4 = resolvers.resolve_a().await?;
+//! let ipv6 = resolvers.resolve_aaaa().await.unwrap_or_default(); // none without IPv6
 //!
 //! // replace the domain's A/AAAA records with the resolved addresses
-//! if !ips.is_empty() {
-//!     let summary = client.update(ips).await?;
-//!     println!("{summary:?}");
-//! }
+//! let ips = ipv4.into_iter().map(IpAddr::from).chain(ipv6.into_iter().map(IpAddr::from));
+//! let summary = client.update(ips).await?;
+//! println!("{summary:?}");
 //! # Ok(())
 //! # }
 //! ```
