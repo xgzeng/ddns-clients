@@ -108,9 +108,10 @@ OpenWrt 25.12 replaced opkg with apk, so 24.10 and older can't install these
 packages. `openwrt/package.sh` packages a static binary with `apk mkpkg`, without
 the OpenWrt SDK. A static binary runs on every CPU of its architecture, so
 `package.sh` can package one aarch64 binary for several OpenWrt architectures,
-whose names `apk` checks against `/etc/apk/arch`. Releases only have
-`aarch64_generic`; more names, e.g. `aarch64_cortex-a53`, can be added to the
-`apk` job in `build.yml`. Other CPU architectures, such as `mipsel_24kc` and
+whose names `apk` checks against `/etc/apk/arch`: it refuses an `aarch64_generic`
+package on an `aarch64_cortex-a53` router. Releases have `aarch64_generic`,
+`aarch64_cortex-a53`, `aarch64_cortex-a72` and `aarch64_cortex-a76`, listed in
+the `apk` job of `build.yml`. Other CPU architectures, such as `mipsel_24kc` and
 `arm_cortex-a7`, also need a static binary from `build.yml`.
 
 `mise run apk` (`scripts/build-apk.sh`) builds the binary and the packages in a

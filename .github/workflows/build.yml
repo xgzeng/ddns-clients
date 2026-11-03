@@ -90,11 +90,12 @@ jobs:
           name: binary-aarch64-unknown-linux-musl
           path: binaries
       - name: Package
-        # only aarch64_generic is released
+        # apk installs only packages of an architecture /etc/apk/arch lists,
+        # so the one aarch64 binary is packaged under each aarch64 name
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
           sh openwrt/package.sh "binaries/ddnsd-$version-aarch64-unknown-linux-musl" dist \
-            aarch64_generic
+            aarch64_generic aarch64_cortex-a53 aarch64_cortex-a72 aarch64_cortex-a76
       - uses: actions/upload-artifact@v4
         with:
           name: apk
