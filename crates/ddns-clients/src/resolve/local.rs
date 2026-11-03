@@ -1,7 +1,4 @@
-use std::{
-    fmt,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
-};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -133,15 +130,6 @@ impl AddressMonitor {
                 return Ok(());
             }
         }
-    }
-}
-
-impl fmt::Debug for AddressMonitor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AddressMonitor")
-            .field("interface", &self.interface)
-            .field("known", &self.known)
-            .finish_non_exhaustive()
     }
 }
 

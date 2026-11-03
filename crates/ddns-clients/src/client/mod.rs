@@ -1,6 +1,6 @@
 mod plan;
 
-use std::{fmt, net::IpAddr, time::Instant};
+use std::{net::IpAddr, time::Instant};
 
 use anyhow::{Result, bail};
 use plan::Operation;
@@ -267,20 +267,6 @@ impl UpdateSummary {
     /// Returns `true` if no record was changed.
     pub fn is_unchanged(&self) -> bool {
         self.updated == 0 && self.deleted == 0 && self.created == 0
-    }
-}
-
-impl fmt::Debug for DynDnsClient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DynDnsClient")
-            .field("domain", &self.domain())
-            .field("ttl", &self.ttl)
-            .field("ipv4", &self.ipv4)
-            .field("ipv6", &self.ipv6)
-            .field("max_records", &self.max_records)
-            .field("replace_only", &self.replace_only)
-            .field("dry_run", &self.dry_run)
-            .finish_non_exhaustive()
     }
 }
 
@@ -583,17 +569,6 @@ impl DynDnsClientBuilder {
     }
 }
 
-impl fmt::Debug for DynDnsClientBuilder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // credentials are left out
-        f.debug_struct("DynDnsClientBuilder")
-            .field("provider", &self.kind.name())
-            .field("domain", &self.domain)
-            .field("ttl", &self.ttl)
-            .finish_non_exhaustive()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -700,12 +675,17 @@ mod tests {
     }
 
     fn invalid_config(result: Result<DynDnsClient>) -> String {
-        result.unwrap_err().to_string()
+        let Err(err) = result else {
+            panic!("expected an invalid config");
+        };
+        err.to_string()
     }
 
     #[test]
     fn unknown_provider() {
-        let err = DynDnsClient::provider("nope").unwrap_err();
+        let Err(err) = DynDnsClient::provider("nope") else {
+            panic!("expected an unknown provider");
+        };
         let expected = if cfg!(feature = "pkarr") {
             r#"unknown provider "nope", expected one of: cloudflare, noip, pkarr"#
         } else {

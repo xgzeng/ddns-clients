@@ -13,10 +13,7 @@ mod http;
 #[cfg(target_os = "linux")]
 mod local;
 
-use std::{
-    fmt::Debug,
-    net::{Ipv4Addr, Ipv6Addr},
-};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -31,7 +28,7 @@ pub use local::{AddressMonitor, LocalResolver};
 /// An empty list means the resolver found none of that family, or doesn't
 /// support it.
 #[async_trait]
-pub trait IpResolver: Debug + Send + Sync {
+pub trait IpResolver: Send + Sync {
     /// Resolves the public IPv4 addresses, for A records.
     async fn resolve_a(&self) -> Result<Vec<Ipv4Addr>>;
 
@@ -45,7 +42,6 @@ pub trait IpResolver: Debug + Send + Sync {
 /// [`any`](Self::any) skips failed resolvers, logging their errors;
 /// [`all`](Self::all) fails if any of them fails. Composites nest, e.g. an
 /// `all` of the local addresses and an `any` of two echo services.
-#[derive(Debug)]
 pub struct CompositeResolver {
     /// Whether every resolver must succeed; otherwise failed ones are skipped.
     all: bool,
@@ -144,7 +140,6 @@ mod tests {
     use super::*;
 
     /// Returns fixed results: `None` fails, `Some` returns the addresses.
-    #[derive(Debug)]
     struct Fixed {
         v4: Option<Vec<Ipv4Addr>>,
         v6: Option<Vec<Ipv6Addr>>,

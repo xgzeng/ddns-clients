@@ -74,6 +74,17 @@ pub enum ResolverConfig {
     },
 }
 
+/// The IPv4 and IPv6 URLs of an `http` resolver: each family's own URL, or
+/// else `url`.
+fn family_urls(
+    url: Option<&str>,
+    ipv4_url: Option<&str>,
+    ipv6_url: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let pick = |family_url: Option<&str>| family_url.or(url).map(str::to_owned);
+    (pick(ipv4_url), pick(ipv6_url))
+}
+
 impl ResolverConfig {
     fn resolver(&self) -> Box<dyn IpResolver> {
         match self {
@@ -83,10 +94,11 @@ impl ResolverConfig {
                 url,
                 ipv4_url,
                 ipv6_url,
-            } => Box::new(HttpResolver::new(
-                ipv4_url.as_ref().or(url.as_ref()).cloned(),
-                ipv6_url.as_ref().or(url.as_ref()).cloned(),
-            )),
+            } => {
+                let (ipv4_url, ipv6_url) =
+                    family_urls(url.as_deref(), ipv4_url.as_deref(), ipv6_url.as_deref());
+                Box::new(HttpResolver::new(ipv4_url, ipv6_url))
+            }
             #[cfg(target_os = "linux")]
             ResolverConfig::Local { interface } => {
                 let resolver = ddns_clients::resolve::LocalResolver::default();
@@ -428,8 +440,8 @@ impl Config {
             .ttl(self.ttl(provider))
             .enable_ipv4(provider.ipv4.unwrap_or(self.ipv4))
             .enable_ipv6(provider.ipv6.unwrap_or(self.ipv6))
-            .max_records(Some(provider.max_records.unwrap_or(self.max_records)))
-            .replace_only(provider.replace_only.unwrap_or(self.replace_only))
+            .max_records(Some(self.max_records(provider)))
+            .replace_only(self.replace_only(provider))
             .build()
     }
 
@@ -453,6 +465,16 @@ impl Config {
     fn ttl(&self, provider: &ProviderConfig) -> Option<u32> {
         let ttl = provider.ttl.unwrap_or(self.ttl);
         (ttl != 0).then_some(ttl)
+    }
+
+    /// The maximum number of `provider`'s A/AAAA records.
+    fn max_records(&self, provider: &ProviderConfig) -> usize {
+        provider.max_records.unwrap_or(self.max_records)
+    }
+
+    /// Whether `provider` only re-points existing records.
+    fn replace_only(&self, provider: &ProviderConfig) -> bool {
+        provider.replace_only.unwrap_or(self.replace_only)
     }
 
     /// How often `provider` reads its records again; `None` (configured as 0)
@@ -608,17 +630,17 @@ cache_expire = 600
         assert_eq!(config.ttl(&config.provider["home"]), None);
         assert!(!home.client.is_ipv4_enabled());
         assert!(home.client.is_ipv6_enabled());
-        assert!(format!("{:?}", home.client).contains("max_records: Some(4)"));
+        assert_eq!(config.max_records(&config.provider["home"]), 4);
         assert_eq!(home.cache_expire, None);
-        assert!(format!("{:?}", home.client).contains("replace_only: true"));
+        assert!(config.replace_only(&config.provider["home"]));
         assert_eq!(noip.name, "noip");
         assert_eq!(noip.client.domain(), "myhost.ddns.net");
         assert_eq!(config.ttl(&config.provider["noip"]), Some(60));
         assert!(noip.client.is_ipv4_enabled());
         assert!(!noip.client.is_ipv6_enabled());
-        assert!(format!("{:?}", noip.client).contains("max_records: Some(1)"));
+        assert_eq!(config.max_records(&config.provider["noip"]), 1);
         assert_eq!(noip.cache_expire, Some(Duration::from_secs(600)));
-        assert!(format!("{:?}", noip.client).contains("replace_only: false"));
+        assert!(!config.replace_only(&config.provider["noip"]));
     }
 
     #[test]
@@ -640,9 +662,9 @@ cache_expire = 600
         assert_eq!(config.ttl(&config.provider["cloudflare"]), Some(600));
         assert!(target.client.is_ipv4_enabled());
         assert!(target.client.is_ipv6_enabled());
-        assert!(format!("{:?}", target.client).contains("max_records: Some(2)"));
+        assert_eq!(config.max_records(&config.provider["cloudflare"]), 2);
         assert_eq!(target.cache_expire, Some(Duration::from_secs(3600)));
-        assert!(format!("{:?}", target.client).contains("replace_only: false"));
+        assert!(!config.replace_only(&config.provider["cloudflare"]));
     }
 
     #[test]
@@ -685,38 +707,31 @@ cache_expire = 600
                 ipv6_url: None,
             }]
         );
-        let debug = format!("{:?}", config.resolver());
-        assert_eq!(
-            debug.matches("https://ip.example.com").count(),
-            2,
-            "{debug}"
-        );
     }
 
     #[test]
-    fn http_resolver_family_url_overrides_url() {
-        // the debug output lists the IPv4 URL, then the IPv6 URL
-        for (keys, expected) in [
-            (
-                r#"url = "https://a", ipv6_url = "https://b""#,
-                ["https://a", "https://b"],
-            ),
-            (
-                r#"url = "https://a", ipv4_url = "https://b""#,
-                ["https://b", "https://a"],
-            ),
-        ] {
-            let config = load(
-                "override",
-                &format!("resolvers = [{{ type = \"http\", {keys} }}]\n{MINIMAL}"),
-            )
-            .unwrap();
-            let debug = format!("{:?}", config.resolver());
-            let v4 = debug.find(expected[0]).expect(&debug);
-            let v6 = debug.rfind(expected[1]).expect(&debug);
-            assert!(v4 < v6, "{debug}");
-            assert_eq!(debug.matches("https://").count(), 2, "{debug}");
-        }
+    fn http_resolver_family_urls() {
+        let urls =
+            |v4: Option<&str>, v6: Option<&str>| (v4.map(String::from), v6.map(String::from));
+        // url for both families
+        assert_eq!(
+            family_urls(Some("https://a"), None, None),
+            urls(Some("https://a"), Some("https://a"))
+        );
+        // a family's own URL overrides url
+        assert_eq!(
+            family_urls(Some("https://a"), None, Some("https://b")),
+            urls(Some("https://a"), Some("https://b"))
+        );
+        assert_eq!(
+            family_urls(Some("https://a"), Some("https://b"), None),
+            urls(Some("https://b"), Some("https://a"))
+        );
+        // a family without a URL isn't resolved
+        assert_eq!(
+            family_urls(None, Some("https://b"), None),
+            urls(Some("https://b"), None)
+        );
     }
 
     #[test]
@@ -743,8 +758,6 @@ cache_expire = 600
                 interface: Some("eth0".into())
             }]
         );
-        let debug = format!("{:?}", config.resolver());
-        assert!(debug.contains("\"eth0\""), "{debug}");
 
         let err = load(
             "noiface",
@@ -763,10 +776,12 @@ cache_expire = 600
             ),
         )
         .unwrap();
-        let debug = format!("{:?}", config.resolver());
-        assert!(debug.contains("all: true"), "{debug}");
-        assert!(debug.contains("icanhazip.com"), "{debug}");
-        assert!(debug.contains("ipify.org"), "{debug}");
+        assert_eq!(
+            config.resolvers,
+            vec![ResolverConfig::All {
+                resolvers: vec![ResolverConfig::Icanhazip, ResolverConfig::Ipify]
+            }]
+        );
 
         let err = load(
             "nestedempty",

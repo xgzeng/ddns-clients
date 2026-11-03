@@ -401,7 +401,6 @@ mod tests {
         })
     }
 
-    #[derive(Debug)]
     struct Fixed;
 
     #[async_trait]
@@ -417,7 +416,6 @@ mod tests {
 
     /// Answers IPv4 lookups with the shared addresses, or fails on `None`;
     /// finds no IPv6 address.
-    #[derive(Debug)]
     struct Scripted(Arc<Mutex<Option<Vec<Ipv4Addr>>>>);
 
     #[async_trait]
