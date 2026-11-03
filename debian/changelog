@@ -1,3 +1,13 @@
+ddns-clients (0.0.8) unstable; urgency=medium
+
+  * Resolvers: `all` is now the intersection of its resolvers' addresses,
+    so the default publishes only the local addresses that an echo service
+    also sees. Hosts behind NAT, or with a private or CGNAT WAN address,
+    need an echo-only resolvers list to publish an IPv4 address.
+  * The version is logged at startup.
+
+ -- XiaoGuang Zeng <xgzeng@gmail.com>  Tue, 03 Nov 2026 10:04:45 -0500
+
 ddns-clients (0.0.7) unstable; urgency=medium
 
   * OpenWrt: packages for aarch64_generic, aarch64_cortex-a53,
