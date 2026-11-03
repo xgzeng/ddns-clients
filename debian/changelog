@@ -1,3 +1,16 @@
+ddns-clients (0.0.5) unstable; urgency=medium
+
+  * New PKARR provider: A and AAAA records signed with an Ed25519 key,
+    published on the Mainline DHT and PKARR relays. The key is given as
+    secret_key or read from secret_file, relative to the config file's
+    directory. The packet is published again every cache_expire, which
+    can't be 0 for it; relays and keep_other_records are optional.
+  * Library: the PKARR provider is behind the default-on pkarr feature;
+    DynDnsClientBuilder::new is public and takes the provider name; the
+    resolve::IpFamily enum is removed.
+
+ -- XiaoGuang Zeng <xgzeng@gmail.com>  Tue, 03 Nov 2026 04:12:44 -0500
+
 ddns-clients (0.0.4) unstable; urgency=medium
 
   * Renamed settings: interval is now resolve_interval, and refresh_interval
