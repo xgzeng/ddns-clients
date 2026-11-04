@@ -36,6 +36,10 @@ enum Command {
     /// Run one update pass without changing any records; the planned
     /// changes are logged.
     DryRun,
+    /// Generate a PKARR secret key: prints it, 64 hex digits, to stdout for
+    /// `secret_key` or `secret_file`, and its public key to stderr.
+    #[cfg(feature = "pkarr")]
+    PkarrKeygen,
 }
 
 /// A configured provider and its update state.
@@ -181,6 +185,17 @@ struct Daemon {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let dry_run = match args.command {
+        None => false,
+        Some(Command::DryRun) => true,
+        #[cfg(feature = "pkarr")]
+        Some(Command::PkarrKeygen) => {
+            let (secret, public) = ddns_clients::providers::pkarr::generate_secret_key();
+            println!("{secret}");
+            eprintln!("public key: {public}");
+            return Ok(());
+        }
+    };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("ddnsd {} starting", env!("CARGO_PKG_VERSION"));
 
@@ -189,19 +204,16 @@ async fn main() -> Result<()> {
     let targets = config
         .targets()
         .with_context(|| format!("invalid provider in {}", args.config.display()))?;
-    let dry_run = matches!(args.command, Some(Command::DryRun));
     let mut daemon = Daemon::from_config(&config, targets, dry_run);
-    match args.command {
-        None => {
-            #[cfg(target_os = "linux")]
-            watch_addresses(
-                config.resolver.interface.clone(),
-                daemon.addresses_changed.clone(),
-            );
-            daemon.run().await
-        }
-        Some(Command::DryRun) => daemon.dry_run().await,
+    if dry_run {
+        return daemon.dry_run().await;
     }
+    #[cfg(target_os = "linux")]
+    watch_addresses(
+        config.resolver.interface.clone(),
+        daemon.addresses_changed.clone(),
+    );
+    daemon.run().await
 }
 
 /// Sets `changed` whenever the global addresses of `interface`, or of all

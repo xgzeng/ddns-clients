@@ -53,7 +53,7 @@ domain = "myhost.example.com"  # optional for cloudflare, default <hostname>; th
 # ipv6 = false                 # overrides the default above
 
 # [provider.pkarr]
-# secret_key = "..."           # 64 hex digits: openssl rand -hex 32
+# secret_key = "..."           # 64 hex digits: ddnsd pkarr-keygen
 # secret_file = "pkarr.key"    # or a file holding it, mode 600; relative to this
 #                              # file's directory. One of the two is required
 # domain = "home"              # optional, the name below the key: home.<public key>;

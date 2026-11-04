@@ -167,7 +167,7 @@ Packages built with `--no-default-features` leave PKARR out.
 | Setting | |
 |---|---|
 | `type` | `pkarr` |
-| `secret_key` | The key's secret, 64 hex digits, e.g. from `openssl rand -hex 32`; this or `secret_file` is required |
+| `secret_key` | The key's secret, 64 hex digits, e.g. from `ddnsd pkarr-keygen`; this or `secret_file` is required |
 | `secret_file` | A file holding `secret_key`, as PKARR's key files do; a relative path is relative to the config file's directory. Like the config file, it must not be readable by group or others. The Debian service can't read files under `/home` |
 | `domain` | The name below the key, e.g. `home` for `home.<public key>`; default the key itself, as do `""` and `@` |
 | `relays` | PKARR relay URLs to publish to and read from besides the DHT; `[]` uses only the DHT; default pkarr's relays (`https://pkarr.pubky.app`, `https://pkarr.pubky.org`) |
@@ -176,8 +176,10 @@ Packages built with `--no-default-features` leave PKARR out.
 All records of a key are one signed packet, which every change publishes again
 in full. The DHT drops packets after a few hours, so every `cache_expire`
 (default an hour) the packet is read and published again, re-signed; it can't
-be `0`. The public key, and with it the domain, is in the logs, e.g. of
-`ddnsd dry-run`.
+be `0`. The public key is logged at startup, e.g. of `ddnsd dry-run`.
+
+`ddnsd pkarr-keygen` generates a key: it prints the secret to stdout, and the
+public key to stderr.
 
 ```toml
 [provider.pkarr]
@@ -186,7 +188,7 @@ domain = "home"
 ```
 
 ```sh
-(umask 077; openssl rand -hex 32 > /etc/pkarr.key)
+(umask 077; ddnsd pkarr-keygen > /etc/pkarr.key)
 ```
 
 ### Domain names

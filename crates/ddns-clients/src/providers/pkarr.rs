@@ -78,6 +78,18 @@ fn parse_secret_key(hex: &str) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+/// Generates a random secret key, returned as 64 hex digits with its
+/// z-base32 public key.
+pub fn generate_secret_key() -> (String, String) {
+    let keypair = Keypair::random();
+    let secret = keypair
+        .secret_key()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    (secret, keypair.public_key().to_z32())
+}
+
 /// The full domain of `name` under the key `origin`: the key itself for an
 /// empty name or `@`, else `<name>.<origin>` unless it already ends with it.
 fn full_domain(name: &str, origin: &str) -> String {
@@ -138,11 +150,14 @@ impl PkarrProvider {
     /// `relays` are the PKARR relay URLs to publish to and read from besides
     /// the DHT; `None` uses the default relays, and an empty list only the DHT.
     ///
-    /// Starts the DHT client, which joins the DHT in the background.
+    /// Starts the DHT client, which joins the DHT in the background, and logs
+    /// the public key.
     pub fn new(secret_key: &str, name: &str, relays: Option<&[String]>) -> Result<Self> {
         let keypair = Keypair::from_secret_key(&parse_secret_key(secret_key)?);
-        let domain = full_domain(name, &keypair.public_key().to_z32());
+        let public_key = keypair.public_key().to_z32();
+        let domain = full_domain(name, &public_key);
         Name::new(&domain).with_context(|| format!("invalid pkarr name {name:?}"))?;
+        log::info!("{domain}: pkarr public key {public_key}");
 
         let mut builder = Client::builder();
         match relays {
@@ -274,6 +289,14 @@ mod tests {
         assert!(parse_secret_key(&SECRET[2..]).is_err());
         assert!(parse_secret_key(&SECRET.replace('0', "g")).is_err());
         assert!(parse_secret_key(&SECRET.replace("01", "é")).is_err());
+    }
+
+    #[test]
+    fn generates_secret_key() {
+        let (secret, public) = generate_secret_key();
+        let keypair = Keypair::from_secret_key(&parse_secret_key(&secret).unwrap());
+        assert_eq!(keypair.public_key().to_z32(), public);
+        assert_ne!(generate_secret_key().0, secret);
     }
 
     #[test]

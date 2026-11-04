@@ -9,6 +9,8 @@ ddnsd \- dynamic DNS daemon
 .B ddnsd dry\-run
 .RB [ \-c
 .IR config ]
+.br
+.B ddnsd pkarr\-keygen
 .SH DESCRIPTION
 .B ddnsd
 periodically finds this host's public IPv4 and IPv6 addresses and keeps the
@@ -37,6 +39,13 @@ seconds.
 Run one update pass without changing any records: the planned changes are
 logged, and the providers are only read from. Exits with a non-zero status if
 any provider failed.
+.TP
+.B pkarr\-keygen
+Generate a random PKARR secret key. The secret, 64 hex digits for
+.B secret_key
+or
+.BR secret_file ,
+is printed to standard output, and its public key to standard error.
 .SH OPTIONS
 .TP
 .BR \-c ", " \-\-config " " \fIconfig\fR

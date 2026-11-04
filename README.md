@@ -95,6 +95,7 @@ client.update(ips).await?; // replaces the domain's A/AAAA records
 ```sh
 ddnsd -c /etc/ddnsd.toml           # the default path
 sudo ddnsd dry-run                 # one update pass that only logs the changes
+ddnsd pkarr-keygen                 # a new PKARR secret key, and its public key
 ```
 
 `dry-run` runs one update pass without changing any records: the planned
