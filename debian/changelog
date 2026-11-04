@@ -1,3 +1,23 @@
+ddns-clients (0.0.9) unstable; urgency=medium
+
+  * Resolvers: the `resolvers` list and `watch_interface` are replaced by
+    an optional [resolver] table (local, interface, builtin_urls, url,
+    ipv4_url, ipv6_url); configs setting them must be updated.
+  * Every global address of local interfaces that an echo service, asked
+    from that address, sees as itself is published, so all public IPv6
+    addresses, or the addresses of several uplinks, are found. With
+    local = false, the address the echo service sees is published.
+  * Echo services are fallbacks: icanhazip, ifconfig.me and ipify, then
+    custom URLs; the one that last answered is kept until it fails.
+  * Temporary and tentative IPv6 addresses are skipped.
+  * Library: DefaultResolver replaces CompositeResolver and
+    default_resolvers(); IpResolver::check; HttpResolver is built with
+    new() and with_url/with_url_v4/with_url_v6, the built-in services
+    are URL constants.
+  * OpenWrt: the config shows secret_key as the PKARR example.
+
+ -- XiaoGuang Zeng <xgzeng@gmail.com>  Tue, 03 Nov 2026 21:42:03 -0500
+
 ddns-clients (0.0.8) unstable; urgency=medium
 
   * Resolvers: `all` is now the intersection of its resolvers' addresses,
