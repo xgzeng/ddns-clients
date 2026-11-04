@@ -100,11 +100,9 @@ fn urls<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>
 impl ResolverConfig {
     fn resolver(&self) -> Box<dyn IpResolver> {
         match self {
-            ResolverConfig::Icanhazip => Box::new(
-                HttpResolver::new()
-                    .with_url_v4(HttpResolver::ICANHAZIP_IPV4)
-                    .with_url_v6(HttpResolver::ICANHAZIP_IPV6),
-            ),
+            ResolverConfig::Icanhazip => {
+                Box::new(HttpResolver::new().with_url(HttpResolver::ICANHAZIP))
+            }
             ResolverConfig::Ipify => Box::new(
                 HttpResolver::new()
                     .with_url_v4(HttpResolver::IPIFY_IPV4)
@@ -564,23 +562,20 @@ fn default_max_records() -> usize {
     2
 }
 
-/// Like [`ddns_clients::resolve::default_resolvers`]: local AND icanhazip,
-/// falling back to ipify and ifconfig.me.
+/// Like [`ddns_clients::resolve::default_resolvers`]: local AND ipify,
+/// falling back to ifconfig.me and icanhazip.
 fn default_resolvers() -> Vec<ResolverConfig> {
     vec![ResolverConfig::All {
         resolvers: vec![
             #[cfg(target_os = "linux")]
             ResolverConfig::Local { interface: None },
             ResolverConfig::Http {
-                url: vec![HttpResolver::IFCONFIG_ME.into()],
-                ipv4_url: vec![
-                    HttpResolver::ICANHAZIP_IPV4.into(),
-                    HttpResolver::IPIFY_IPV4.into(),
+                url: vec![
+                    HttpResolver::IFCONFIG_ME.into(),
+                    HttpResolver::ICANHAZIP.into(),
                 ],
-                ipv6_url: vec![
-                    HttpResolver::ICANHAZIP_IPV6.into(),
-                    HttpResolver::IPIFY_IPV6.into(),
-                ],
+                ipv4_url: vec![HttpResolver::IPIFY_IPV4.into()],
+                ipv6_url: vec![HttpResolver::IPIFY_IPV6.into()],
             },
         ],
     }]

@@ -26,9 +26,9 @@ resolvers = [
   { type = "all", resolvers = [
     { type = "local" },
     { type = "http",
-      ipv4_url = ["https://ipv4.icanhazip.com", "https://api.ipify.org"],
-      ipv6_url = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"],
-      url = "https://ifconfig.me/ip" },
+      ipv4_url = "https://api.ipify.org",
+      ipv6_url = "https://api6.ipify.org",
+      url = ["https://ifconfig.me/ip", "https://icanhazip.com"] },
   ] },
 ]
 
@@ -55,7 +55,7 @@ otherwise read them as part of that table.
 | `tick` | `15` | Seconds between the daemon's checks. Each check looks up the public addresses once `resolve_interval` has passed, and updates the providers whose addresses changed or whose last update failed, unless the provider asked to wait; must not be `0` |
 | `resolve_interval` | `300` | Seconds between lookups of the public addresses, which happen at the first check after it. On Linux they are also looked up at the next check after the global addresses of a local interface change, e.g. after a WAN reconnect |
 | `watch_interface` | all | The interface whose address changes trigger a lookup, e.g. `pppoe-wan`; Linux only |
-| `resolvers` | local and icanhazip, falling back to ipify and ifconfig.me | How to find the public addresses, see [Resolvers](#resolvers); must not be empty |
+| `resolvers` | local and ipify, falling back to ifconfig.me and icanhazip | How to find the public addresses, see [Resolvers](#resolvers); must not be empty |
 | `ipv4`, `ipv6` | `true` | Which public addresses are looked up, and defaults for all providers; a provider can't enable a family disabled here |
 | `ttl`, `max_records`, `replace_only`, `cache_expire` | | Defaults for all providers, see [Record settings](#record-settings) |
 
@@ -106,9 +106,9 @@ resolvers = [
   { type = "all", resolvers = [
     { type = "local" },
     { type = "http",
-      ipv4_url = ["https://ipv4.icanhazip.com", "https://api.ipify.org"],
-      ipv6_url = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"],
-      url = "https://ifconfig.me/ip" },
+      ipv4_url = "https://api.ipify.org",
+      ipv6_url = "https://api6.ipify.org",
+      url = ["https://ifconfig.me/ip", "https://icanhazip.com"] },
   ] },
 ]
 ```

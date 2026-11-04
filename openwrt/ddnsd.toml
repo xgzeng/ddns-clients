@@ -9,9 +9,9 @@
 #   { type = "all", resolvers = [
 #     { type = "local" },        # optionally interface = "wan"
 #     { type = "http",           # echo services, the next one used if one fails
-#       ipv4_url = ["https://ipv4.icanhazip.com", "https://api.ipify.org"],
-#       ipv6_url = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"],
-#       url = "https://ifconfig.me/ip" },
+#       ipv4_url = "https://api.ipify.org",
+#       ipv6_url = "https://api6.ipify.org",
+#       url = ["https://ifconfig.me/ip", "https://icanhazip.com"] },
 #   ] },
 # ]
 

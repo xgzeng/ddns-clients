@@ -20,9 +20,9 @@ use super::IpResolver;
 /// use ddns_clients::resolve::HttpResolver;
 ///
 /// let resolver = HttpResolver::new()
-///     .with_url_v4(HttpResolver::ICANHAZIP_IPV4)
-///     .with_url_v6(HttpResolver::ICANHAZIP_IPV6)
-///     .with_url(HttpResolver::IFCONFIG_ME);
+///     .with_url_v4(HttpResolver::IPIFY_IPV4)
+///     .with_url_v6(HttpResolver::IPIFY_IPV6)
+///     .with_url(HttpResolver::ICANHAZIP);
 /// ```
 #[derive(Debug, Clone)]
 pub struct HttpResolver {
@@ -107,10 +107,8 @@ impl Clone for Endpoints {
 }
 
 impl HttpResolver {
-    /// <https://icanhazip.com> over IPv4.
-    pub const ICANHAZIP_IPV4: &str = "https://ipv4.icanhazip.com";
-    /// <https://icanhazip.com> over IPv6.
-    pub const ICANHAZIP_IPV6: &str = "https://ipv6.icanhazip.com";
+    /// <https://icanhazip.com> over both families.
+    pub const ICANHAZIP: &str = "https://icanhazip.com";
     /// <https://www.ipify.org> over IPv4.
     pub const IPIFY_IPV4: &str = "https://api.ipify.org";
     /// <https://www.ipify.org> over IPv6.

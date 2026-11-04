@@ -136,16 +136,15 @@ impl IpResolver for CompositeResolver {
 }
 
 /// The default resolver: the global addresses of local interfaces that an
-/// echo service also sees, <https://icanhazip.com> with
-/// <https://www.ipify.org> and <https://ifconfig.me> as fallbacks; on other
+/// echo service also sees, <https://icanhazip.com> with <https://ifconfig.me>
+/// and <https://www.ipify.org> as fallbacks; on other
 /// systems, just what the echo service sees.
 pub fn default_resolvers() -> CompositeResolver {
     let echo = HttpResolver::new()
-        .with_url_v4(HttpResolver::ICANHAZIP_IPV4)
-        .with_url_v6(HttpResolver::ICANHAZIP_IPV6)
+        .with_url(HttpResolver::ICANHAZIP)
+        .with_url(HttpResolver::IFCONFIG_ME)
         .with_url_v4(HttpResolver::IPIFY_IPV4)
-        .with_url_v6(HttpResolver::IPIFY_IPV6)
-        .with_url(HttpResolver::IFCONFIG_ME);
+        .with_url_v6(HttpResolver::IPIFY_IPV6);
     CompositeResolver::all(vec![
         #[cfg(target_os = "linux")]
         Box::new(LocalResolver::default()),
