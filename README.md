@@ -19,9 +19,9 @@ DNS providers:
 | No-IP | at most one A and one AAAA record per hostname, which can be re-pointed but not removed; TTL is ignored; current records are read from No-IP's nameservers over DNS |
 | [PKARR](https://pkdns.net) | records under an Ed25519 key, published on the Mainline DHT and PKARR relays and republished every `cache_expire`; the `pkarr` cargo feature, on by default |
 
-IP resolvers: HTTP echo services (icanhazip, ipify, or custom URLs) and local
-interfaces via netlink (Linux), which can be combined, e.g. to the local
-addresses an echo service confirms.
+IP resolvers: HTTP echo services (icanhazip, ipify, ifconfig.me, or custom
+URLs) and local interfaces via netlink (Linux), which can be combined, e.g. to
+the local addresses an echo service confirms.
 
 ## Installation
 
@@ -72,7 +72,7 @@ To build from source, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 ```rust
 use ddns_clients::{IpResolver, resolve};
 
-let resolver = resolve::default_resolvers();   // local addresses and icanhazip/ipify
+let resolver = resolve::default_resolvers();   // local addresses an echo service sees
 let ipv4 = resolver.resolve_a().await?;        // Vec<Ipv4Addr>
 let ipv6 = resolver.resolve_aaaa().await.unwrap_or_default(); // none without IPv6
 ```

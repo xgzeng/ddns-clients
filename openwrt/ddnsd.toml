@@ -8,7 +8,10 @@
 # resolvers = [
 #   { type = "all", resolvers = [
 #     { type = "local" },        # optionally interface = "wan"
-#     { type = "any", resolvers = [{ type = "icanhazip" }, { type = "ipify" }] },
+#     { type = "http",           # echo services, the next one used if one fails
+#       ipv4_url = ["https://ipv4.icanhazip.com", "https://api.ipify.org"],
+#       ipv6_url = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"],
+#       url = "https://ifconfig.me/ip" },
 #   ] },
 # ]
 
@@ -23,6 +26,5 @@
 # domain = "myhost.ddns.net"
 
 # [provider.pkarr]
-# secret_file = "pkarr.key"    # /etc/pkarr.key, from:
-#                              # (umask 077; openssl rand -hex 32 > /etc/pkarr.key)
+# secret_key = "..."           # 64 hex digits: openssl rand -hex 32
 # domain = "home"              # home.<public key>

@@ -53,11 +53,18 @@ pub struct ProviderConfig {
 pub enum ResolverConfig {
     Icanhazip,
     Ipify,
+    #[serde(rename = "ifconfig.me")]
+    IfconfigMe,
+    /// Echo services, tried in turn: each family's own URLs, then `url`. Each
+    /// is a URL or a list of them.
     Http {
-        /// For the address families without their own URL below.
-        url: Option<String>,
-        ipv4_url: Option<String>,
-        ipv6_url: Option<String>,
+        /// For both address families, after their own URLs below.
+        #[serde(default, deserialize_with = "urls")]
+        url: Vec<String>,
+        #[serde(default, deserialize_with = "urls")]
+        ipv4_url: Vec<String>,
+        #[serde(default, deserialize_with = "urls")]
+        ipv6_url: Vec<String>,
     },
     #[cfg(target_os = "linux")]
     Local {
@@ -74,30 +81,54 @@ pub enum ResolverConfig {
     },
 }
 
-/// The IPv4 and IPv6 URLs of an `http` resolver: each family's own URL, or
-/// else `url`.
-fn family_urls(
-    url: Option<&str>,
-    ipv4_url: Option<&str>,
-    ipv6_url: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    let pick = |family_url: Option<&str>| family_url.or(url).map(str::to_owned);
-    (pick(ipv4_url), pick(ipv6_url))
+/// Reads a URL or a list of URLs.
+fn urls<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(
+        match <OneOrMany as serde::Deserialize>::deserialize(deserializer)? {
+            OneOrMany::One(url) => vec![url],
+            OneOrMany::Many(urls) => urls,
+        },
+    )
 }
 
 impl ResolverConfig {
     fn resolver(&self) -> Box<dyn IpResolver> {
         match self {
-            ResolverConfig::Icanhazip => Box::new(HttpResolver::icanhazip()),
-            ResolverConfig::Ipify => Box::new(HttpResolver::ipify()),
+            ResolverConfig::Icanhazip => Box::new(
+                HttpResolver::new()
+                    .with_url_v4(HttpResolver::ICANHAZIP_IPV4)
+                    .with_url_v6(HttpResolver::ICANHAZIP_IPV6),
+            ),
+            ResolverConfig::Ipify => Box::new(
+                HttpResolver::new()
+                    .with_url_v4(HttpResolver::IPIFY_IPV4)
+                    .with_url_v6(HttpResolver::IPIFY_IPV6),
+            ),
+            ResolverConfig::IfconfigMe => {
+                Box::new(HttpResolver::new().with_url(HttpResolver::IFCONFIG_ME))
+            }
             ResolverConfig::Http {
                 url,
                 ipv4_url,
                 ipv6_url,
             } => {
-                let (ipv4_url, ipv6_url) =
-                    family_urls(url.as_deref(), ipv4_url.as_deref(), ipv6_url.as_deref());
-                Box::new(HttpResolver::new(ipv4_url, ipv6_url))
+                let mut resolver = HttpResolver::new();
+                for url in ipv4_url {
+                    resolver = resolver.with_url_v4(url);
+                }
+                for url in ipv6_url {
+                    resolver = resolver.with_url_v6(url);
+                }
+                for url in url {
+                    resolver = resolver.with_url(url);
+                }
+                Box::new(resolver)
             }
             #[cfg(target_os = "linux")]
             ResolverConfig::Local { interface } => {
@@ -118,12 +149,14 @@ impl ResolverConfig {
 
     fn check(&self) -> Result<()> {
         if let ResolverConfig::Http {
-            url: None,
-            ipv4_url: None,
-            ipv6_url: None,
+            url,
+            ipv4_url,
+            ipv6_url,
         } = self
         {
-            bail!("http resolver: set url, or ipv4_url and/or ipv6_url");
+            if url.is_empty() && ipv4_url.is_empty() && ipv6_url.is_empty() {
+                bail!("http resolver: set url, or ipv4_url and/or ipv6_url");
+            }
         }
         #[cfg(target_os = "linux")]
         if let ResolverConfig::Local {
@@ -531,15 +564,23 @@ fn default_max_records() -> usize {
     2
 }
 
-/// Like [`ddns_clients::resolve::default_resolvers`]: local AND (icanhazip OR
-/// ipify).
+/// Like [`ddns_clients::resolve::default_resolvers`]: local AND icanhazip,
+/// falling back to ipify and ifconfig.me.
 fn default_resolvers() -> Vec<ResolverConfig> {
     vec![ResolverConfig::All {
         resolvers: vec![
             #[cfg(target_os = "linux")]
             ResolverConfig::Local { interface: None },
-            ResolverConfig::Any {
-                resolvers: vec![ResolverConfig::Icanhazip, ResolverConfig::Ipify],
+            ResolverConfig::Http {
+                url: vec![HttpResolver::IFCONFIG_ME.into()],
+                ipv4_url: vec![
+                    HttpResolver::ICANHAZIP_IPV4.into(),
+                    HttpResolver::IPIFY_IPV4.into(),
+                ],
+                ipv6_url: vec![
+                    HttpResolver::ICANHAZIP_IPV6.into(),
+                    HttpResolver::IPIFY_IPV6.into(),
+                ],
             },
         ],
     }]
@@ -584,6 +625,7 @@ max_records = 4
 replace_only = true
 resolvers = [
   { type = "ipify" },
+  { type = "ifconfig.me" },
   { type = "http", ipv4_url = "https://ip4.example.com" },
 ]
 
@@ -613,10 +655,11 @@ cache_expire = 600
             config.resolvers,
             vec![
                 ResolverConfig::Ipify,
+                ResolverConfig::IfconfigMe,
                 ResolverConfig::Http {
-                    url: None,
-                    ipv4_url: Some("https://ip4.example.com".into()),
-                    ipv6_url: None,
+                    url: vec![],
+                    ipv4_url: vec!["https://ip4.example.com".into()],
+                    ipv6_url: vec![],
                 },
             ]
         );
@@ -702,35 +745,31 @@ cache_expire = 600
         assert_eq!(
             config.resolvers,
             vec![ResolverConfig::Http {
-                url: Some("https://ip.example.com".into()),
-                ipv4_url: None,
-                ipv6_url: None,
+                url: vec!["https://ip.example.com".into()],
+                ipv4_url: vec![],
+                ipv6_url: vec![],
             }]
         );
     }
 
     #[test]
-    fn http_resolver_family_urls() {
-        let urls =
-            |v4: Option<&str>, v6: Option<&str>| (v4.map(String::from), v6.map(String::from));
-        // url for both families
+    fn http_resolver_url_lists() {
+        let config = load(
+            "urllists",
+            &format!(
+                r#"resolvers = [{{ type = "http", url = "https://both",
+  ipv4_url = ["https://v4a", "https://v4b"], ipv6_url = [] }}]
+{MINIMAL}"#
+            ),
+        )
+        .unwrap();
         assert_eq!(
-            family_urls(Some("https://a"), None, None),
-            urls(Some("https://a"), Some("https://a"))
-        );
-        // a family's own URL overrides url
-        assert_eq!(
-            family_urls(Some("https://a"), None, Some("https://b")),
-            urls(Some("https://a"), Some("https://b"))
-        );
-        assert_eq!(
-            family_urls(Some("https://a"), Some("https://b"), None),
-            urls(Some("https://b"), Some("https://a"))
-        );
-        // a family without a URL isn't resolved
-        assert_eq!(
-            family_urls(None, Some("https://b"), None),
-            urls(Some("https://b"), None)
+            config.resolvers,
+            vec![ResolverConfig::Http {
+                url: vec!["https://both".into()],
+                ipv4_url: vec!["https://v4a".into(), "https://v4b".into()],
+                ipv6_url: vec![],
+            }]
         );
     }
 

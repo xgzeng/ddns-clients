@@ -1,32 +1,55 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 
 use super::IpResolver;
 
-/// Resolves addresses by querying an online service that echoes the client's
-/// IP as plain text, with one URL for both families or one per family.
+/// Resolves addresses by querying online services that echo the client's IP
+/// as plain text, with URLs for both families or per family.
 ///
-/// Each family's requests only connect over that family, so a URL shared by
-/// both needs a host reachable over both.
+/// Each family's URLs are fallbacks: the one that last answered is asked
+/// first, and the others, in order, only if it fails. Each family's requests
+/// only connect over that family, so a URL for both needs a host reachable
+/// over both.
+///
+/// ```no_run
+/// use ddns_clients::resolve::HttpResolver;
+///
+/// let resolver = HttpResolver::new()
+///     .with_url_v4(HttpResolver::ICANHAZIP_IPV4)
+///     .with_url_v6(HttpResolver::ICANHAZIP_IPV6)
+///     .with_url(HttpResolver::IFCONFIG_ME);
+/// ```
 #[derive(Debug, Clone)]
 pub struct HttpResolver {
-    ipv4: Option<Endpoint>,
-    ipv6: Option<Endpoint>,
+    ipv4: Endpoints,
+    ipv6: Endpoints,
 }
 
-/// A family's URL, and the client to query it with.
-#[derive(Debug, Clone)]
-struct Endpoint {
+/// A family's URLs, in fallback order, and the client to query them with.
+#[derive(Debug)]
+struct Endpoints {
     client: reqwest::Client,
-    url: String,
+    urls: Vec<String>,
+    /// The index of the URL that last answered.
+    current: AtomicUsize,
 }
 
-impl Endpoint {
-    /// The address the service echoes back.
-    async fn fetch(&self) -> Result<IpAddr> {
-        let url = &self.url;
+impl Endpoints {
+    fn new(client: reqwest::Client) -> Self {
+        Endpoints {
+            client,
+            urls: vec![],
+            current: AtomicUsize::new(0),
+        }
+    }
+
+    /// The address the service at `url` echoes back.
+    async fn fetch(&self, url: &str) -> Result<IpAddr> {
         self.client
             .get(url)
             .send()
@@ -38,49 +61,96 @@ impl Endpoint {
             .parse()
             .with_context(|| format!("{url} returned an invalid ip address"))
     }
+
+    /// The address of `family` ("IPv4" or "IPv6", which `pick` takes) that the
+    /// first URL to answer echoes, starting with the one that last answered;
+    /// none if there are no URLs.
+    async fn resolve<T>(&self, family: &str, pick: fn(IpAddr) -> Option<T>) -> Result<Vec<T>> {
+        let count = self.urls.len();
+        let start = self.current.load(Ordering::Relaxed);
+        let mut last_err = None;
+        for index in (0..count).map(|n| (start + n) % count) {
+            let url = &self.urls[index];
+            if let Some(err) = last_err.take() {
+                log::warn!("{err:#}; trying {url}");
+            }
+            match self.fetch(url).await {
+                Ok(addr) => match pick(addr) {
+                    Some(addr) => {
+                        self.current.store(index, Ordering::Relaxed);
+                        return Ok(vec![addr]);
+                    }
+                    None => {
+                        last_err = Some(anyhow!(
+                            "{url} returned {addr}, expected an {family} address"
+                        ))
+                    }
+                },
+                Err(err) => last_err = Some(err),
+            }
+        }
+        match last_err {
+            Some(err) => Err(err),
+            None => Ok(vec![]),
+        }
+    }
+}
+
+impl Clone for Endpoints {
+    fn clone(&self) -> Self {
+        Endpoints {
+            client: self.client.clone(),
+            urls: self.urls.clone(),
+            current: AtomicUsize::new(self.current.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl HttpResolver {
-    /// Creates a resolver using `url`, on a host reachable over both families.
-    ///
-    /// # Panics
-    ///
-    /// If the HTTP client can't be initialized, as [`reqwest::Client::new`].
-    pub fn dual_stack(url: impl Into<String>) -> Self {
-        let url = url.into();
-        Self::new(Some(url.clone()), Some(url))
-    }
+    /// <https://icanhazip.com> over IPv4.
+    pub const ICANHAZIP_IPV4: &str = "https://ipv4.icanhazip.com";
+    /// <https://icanhazip.com> over IPv6.
+    pub const ICANHAZIP_IPV6: &str = "https://ipv6.icanhazip.com";
+    /// <https://www.ipify.org> over IPv4.
+    pub const IPIFY_IPV4: &str = "https://api.ipify.org";
+    /// <https://www.ipify.org> over IPv6.
+    pub const IPIFY_IPV6: &str = "https://api6.ipify.org";
+    /// <https://ifconfig.me>, over both families.
+    pub const IFCONFIG_ME: &str = "https://ifconfig.me/ip";
 
-    /// Creates a resolver from per-family URLs; `None` disables that family.
+    /// Creates a resolver without URLs, which resolves no family until URLs
+    /// are added.
     ///
     /// # Panics
     ///
     /// If the HTTP client can't be initialized, as [`reqwest::Client::new`].
-    pub fn new(ipv4_url: Option<String>, ipv6_url: Option<String>) -> Self {
-        let endpoint = |local_address, url| Endpoint {
-            client: family_client(reqwest::Client::builder(), local_address),
-            url,
+    pub fn new() -> Self {
+        let endpoints = |local_address: IpAddr| {
+            Endpoints::new(family_client(reqwest::Client::builder(), local_address))
         };
         HttpResolver {
-            ipv4: ipv4_url.map(|url| endpoint(Ipv4Addr::UNSPECIFIED.into(), url)),
-            ipv6: ipv6_url.map(|url| endpoint(Ipv6Addr::UNSPECIFIED.into(), url)),
+            ipv4: endpoints(Ipv4Addr::UNSPECIFIED.into()),
+            ipv6: endpoints(Ipv6Addr::UNSPECIFIED.into()),
         }
     }
 
-    /// Uses <https://icanhazip.com>.
-    pub fn icanhazip() -> Self {
-        Self::new(
-            Some("https://ipv4.icanhazip.com".into()),
-            Some("https://ipv6.icanhazip.com".into()),
-        )
+    /// Adds `url`, on a host reachable over both families, as the last
+    /// fallback of both.
+    pub fn with_url(self, url: impl Into<String>) -> Self {
+        let url = url.into();
+        self.with_url_v4(url.clone()).with_url_v6(url)
     }
 
-    /// Uses <https://www.ipify.org>.
-    pub fn ipify() -> Self {
-        Self::new(
-            Some("https://api.ipify.org".into()),
-            Some("https://api6.ipify.org".into()),
-        )
+    /// Adds `url` as the last IPv4 fallback.
+    pub fn with_url_v4(mut self, url: impl Into<String>) -> Self {
+        self.ipv4.urls.push(url.into());
+        self
+    }
+
+    /// Adds `url` as the last IPv6 fallback.
+    pub fn with_url_v6(mut self, url: impl Into<String>) -> Self {
+        self.ipv6.urls.push(url.into());
+        self
     }
 
     /// Replaces the HTTP client, e.g. to set timeouts or a proxy.
@@ -88,10 +158,15 @@ impl HttpResolver {
     /// Requests of both families then use `client`, which may connect over
     /// either, so each URL has to be reachable over its family only.
     pub fn with_client(mut self, client: reqwest::Client) -> Self {
-        for endpoint in [&mut self.ipv4, &mut self.ipv6].into_iter().flatten() {
-            endpoint.client = client.clone();
-        }
+        self.ipv4.client = client.clone();
+        self.ipv6.client = client;
         self
+    }
+}
+
+impl Default for HttpResolver {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -109,29 +184,21 @@ fn family_client(builder: reqwest::ClientBuilder, local_address: IpAddr) -> reqw
 #[async_trait]
 impl IpResolver for HttpResolver {
     async fn resolve_a(&self) -> Result<Vec<Ipv4Addr>> {
-        let Some(endpoint) = &self.ipv4 else {
-            return Ok(vec![]);
-        };
-        match endpoint.fetch().await? {
-            IpAddr::V4(addr) => Ok(vec![addr]),
-            addr => {
-                log::warn!("{} returned {addr}, expected an IPv4 address", endpoint.url);
-                Ok(vec![])
-            }
-        }
+        self.ipv4
+            .resolve("IPv4", |addr| match addr {
+                IpAddr::V4(addr) => Some(addr),
+                IpAddr::V6(_) => None,
+            })
+            .await
     }
 
     async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>> {
-        let Some(endpoint) = &self.ipv6 else {
-            return Ok(vec![]);
-        };
-        match endpoint.fetch().await? {
-            IpAddr::V6(addr) => Ok(vec![addr]),
-            addr => {
-                log::warn!("{} returned {addr}, expected an IPv6 address", endpoint.url);
-                Ok(vec![])
-            }
-        }
+        self.ipv6
+            .resolve("IPv6", |addr| match addr {
+                IpAddr::V6(addr) => Some(addr),
+                IpAddr::V4(_) => None,
+            })
+            .await
     }
 }
 
@@ -169,25 +236,74 @@ mod tests {
     fn same_url_resolver(addrs: &[SocketAddr]) -> HttpResolver {
         let host = "dual-stack.test";
         let url = format!("http://{host}:{}", addrs[0].port());
-        let endpoint = |local_address| Endpoint {
-            client: family_client(
+        let endpoints = |local_address| Endpoints {
+            urls: vec![url.clone()],
+            ..Endpoints::new(family_client(
                 reqwest::Client::builder().resolve_to_addrs(host, addrs),
                 local_address,
-            ),
-            url: url.clone(),
+            ))
         };
         HttpResolver {
-            ipv4: Some(endpoint(Ipv4Addr::UNSPECIFIED.into())),
-            ipv6: Some(endpoint(Ipv6Addr::UNSPECIFIED.into())),
+            ipv4: endpoints(Ipv4Addr::UNSPECIFIED.into()),
+            ipv6: endpoints(Ipv6Addr::UNSPECIFIED.into()),
         }
     }
 
     #[test]
-    fn dual_stack_uses_url_for_both_families() {
-        let url = "https://ip.example.net";
-        let resolver = HttpResolver::dual_stack(url);
-        assert_eq!(resolver.ipv4.unwrap().url, url);
-        assert_eq!(resolver.ipv6.unwrap().url, url);
+    fn with_url_adds_to_both_families() {
+        let resolver = HttpResolver::new()
+            .with_url_v4("https://v4")
+            .with_url_v6("https://v6")
+            .with_url("https://both");
+        assert_eq!(resolver.ipv4.urls, ["https://v4", "https://both"]);
+        assert_eq!(resolver.ipv6.urls, ["https://v6", "https://both"]);
+    }
+
+    /// A local port nothing listens on.
+    async fn closed_port() -> u16 {
+        let listener = TcpListener::bind((LOCALHOST_V4, 0)).await.unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    fn local_url(port: u16) -> String {
+        format!("http://{LOCALHOST_V4}:{port}")
+    }
+
+    #[tokio::test]
+    async fn falls_back_and_keeps_the_url_that_answered() {
+        let first_port = closed_port().await;
+        let second = TcpListener::bind((LOCALHOST_V4, 0)).await.unwrap();
+        let second_port = second.local_addr().unwrap().port();
+        let second = tokio::spawn(echo_ip(second));
+        let resolver = HttpResolver::new()
+            .with_url_v4(local_url(first_port))
+            .with_url_v4(local_url(second_port));
+        let current = || resolver.ipv4.current.load(Ordering::Relaxed);
+
+        assert_eq!(resolver.resolve_a().await.unwrap(), [Ipv4Addr::LOCALHOST]);
+        assert_eq!(current(), 1);
+
+        // the first answers again, but the second is kept while it answers
+        let first = TcpListener::bind((LOCALHOST_V4, first_port)).await.unwrap();
+        tokio::spawn(echo_ip(first));
+        assert_eq!(resolver.resolve_a().await.unwrap(), [Ipv4Addr::LOCALHOST]);
+        assert_eq!(current(), 1);
+
+        // once the second fails, it wraps around to the first
+        second.abort();
+        let _ = second.await;
+        assert_eq!(resolver.resolve_a().await.unwrap(), [Ipv4Addr::LOCALHOST]);
+        assert_eq!(current(), 0);
+    }
+
+    #[tokio::test]
+    async fn fails_if_all_urls_fail() {
+        let resolver = HttpResolver::new()
+            .with_url_v4(local_url(closed_port().await))
+            .with_url_v4(local_url(closed_port().await));
+        resolver.resolve_a().await.unwrap_err();
+        // no URLs, nothing to resolve
+        assert!(resolver.resolve_aaaa().await.unwrap().is_empty());
     }
 
     #[tokio::test]

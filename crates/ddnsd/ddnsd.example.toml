@@ -14,7 +14,10 @@ resolvers = [                  # combined, failed ones skipped; this is the defa
   { type = "all", resolvers = [  # the local addresses an echo service also sees
     { type = "local" },          # global addresses of local interfaces; only one
                                  # with e.g. interface = "eth0"
-    { type = "any", resolvers = [{ type = "icanhazip" }, { type = "ipify" }] },
+    { type = "http",             # echo services, the next one used if one fails:
+      ipv4_url = ["https://ipv4.icanhazip.com", "https://api.ipify.org"],
+      ipv6_url = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"],
+      url = "https://ifconfig.me/ip" },  # both families, after their own
   ] },
 ]
 # defaults for all providers, each can override them

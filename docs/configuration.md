@@ -25,7 +25,10 @@ ttl = 600
 resolvers = [
   { type = "all", resolvers = [
     { type = "local" },
-    { type = "any", resolvers = [{ type = "icanhazip" }, { type = "ipify" }] },
+    { type = "http",
+      ipv4_url = ["https://ipv4.icanhazip.com", "https://api.ipify.org"],
+      ipv6_url = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"],
+      url = "https://ifconfig.me/ip" },
   ] },
 ]
 
@@ -52,7 +55,7 @@ otherwise read them as part of that table.
 | `tick` | `15` | Seconds between the daemon's checks. Each check looks up the public addresses once `resolve_interval` has passed, and updates the providers whose addresses changed or whose last update failed, unless the provider asked to wait; must not be `0` |
 | `resolve_interval` | `300` | Seconds between lookups of the public addresses, which happen at the first check after it. On Linux they are also looked up at the next check after the global addresses of a local interface change, e.g. after a WAN reconnect |
 | `watch_interface` | all | The interface whose address changes trigger a lookup, e.g. `pppoe-wan`; Linux only |
-| `resolvers` | local and (icanhazip or ipify) | How to find the public addresses, see [Resolvers](#resolvers); must not be empty |
+| `resolvers` | local and icanhazip, falling back to ipify and ifconfig.me | How to find the public addresses, see [Resolvers](#resolvers); must not be empty |
 | `ipv4`, `ipv6` | `true` | Which public addresses are looked up, and defaults for all providers; a provider can't enable a family disabled here |
 | `ttl`, `max_records`, `replace_only`, `cache_expire` | | Defaults for all providers, see [Record settings](#record-settings) |
 
@@ -69,23 +72,29 @@ fails keeps its last known addresses.
 |---|---|
 | `icanhazip` | [icanhazip.com](https://icanhazip.com) |
 | `ipify` | [ipify.org](https://www.ipify.org) |
+| `ifconfig.me` | [ifconfig.me](https://ifconfig.me) |
 | `http` | Any service echoing the client's IP as plain text, see below |
 | `local` | Global addresses of local network interfaces, or only of `interface`, e.g. `interface = "eth0"`; Linux only |
 | `any` | The addresses any of its `resolvers` found, skipping failed ones, like the top-level list |
 | `all` | The addresses all of its `resolvers` found, in the order of the first; fails if any of them fails |
 
-`http` takes `url`, used for both families if its host has both A and AAAA
-records, and `ipv4_url` and `ipv6_url`, which override it for their family. At
-least one is required, and a family left without a URL isn't resolved:
+`http` takes `ipv4_url` and `ipv6_url`, for their family, and `url`, for both
+families if its host has both A and AAAA records. Each is a URL or a list of
+them, and at least one URL is required; a family left without a URL isn't
+resolved. A family's URLs are fallbacks: its own URLs, then `url`, in order.
+The one that last answered is asked first, and the next ones only if it fails:
 
 ```toml
 resolvers = [
   { type = "http", url = "https://ip.example.net" },
   { type = "http", ipv4_url = "https://ipv4.example.net", ipv6_url = "https://ipv6.example.net" },
   { type = "http", url = "https://ip.example.net", ipv6_url = "https://ipv6.example.net" },
-  { type = "http", ipv4_url = "https://ipv4.example.net" },
+  { type = "http", ipv4_url = ["https://ipv4.example.net", "https://ipv4.example.org"] },
 ]
 ```
+
+The third one tries `https://ipv6.example.net` for IPv6 and falls back to
+`https://ip.example.net`.
 
 `any` and `all` nest, separately for IPv4 and IPv6. The default publishes the
 local addresses that an echo service also sees, so a host behind NAT, or with a
@@ -96,15 +105,26 @@ addresses only the one it connects from:
 resolvers = [
   { type = "all", resolvers = [
     { type = "local" },
-    { type = "any", resolvers = [{ type = "icanhazip" }, { type = "ipify" }] },
+    { type = "http",
+      ipv4_url = ["https://ipv4.icanhazip.com", "https://api.ipify.org"],
+      ipv6_url = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"],
+      url = "https://ifconfig.me/ip" },
   ] },
 ]
 ```
 
-Behind a NAT router, publish what an echo service sees instead, e.g. with
-`resolvers = [{ type = "icanhazip" }, { type = "ipify" }]`. With two uplinks,
-this publishes the addresses of both interfaces, skipping one that can't be
-read:
+Behind a NAT router, publish what an echo service sees instead:
+
+```toml
+resolvers = [
+  { type = "http",
+    ipv4_url = ["https://ipv4.icanhazip.com", "https://api.ipify.org"],
+    ipv6_url = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"] },
+]
+```
+
+With two uplinks, this publishes the addresses of both interfaces, skipping one
+that can't be read:
 
 ```toml
 resolvers = [
