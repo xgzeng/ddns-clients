@@ -15,12 +15,11 @@ periodically finds this host's public IPv4 and IPv6 addresses and keeps the
 A and AAAA records of one or more domains pointed at them, using the
 Cloudflare and No-IP DNS providers, or PKARR records on the Mainline DHT.
 .PP
-Addresses are found with HTTP echo services (icanhazip, ipify, ifconfig.me or
-custom URLs) and from the global addresses of local network interfaces, or of
-one interface;
-the configured resolvers are combined for each address family, by default to
-the local addresses that an echo service also sees.
-They are looked up every
+By default, each global address of the local network interfaces, or of one
+interface, is published if an HTTP echo service (icanhazip, ifconfig.me,
+ipify or custom URLs), asked from that address, sees it as itself; behind NAT,
+the address the echo service sees can be published instead.
+The addresses are looked up every
 .B resolve_interval
 seconds, and also at the next check after the global addresses of a local
 interface change, e.g. after a WAN reconnect.

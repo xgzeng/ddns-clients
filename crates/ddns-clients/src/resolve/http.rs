@@ -48,9 +48,9 @@ impl Endpoints {
         }
     }
 
-    /// The address the service at `url` echoes back.
-    async fn fetch(&self, url: &str) -> Result<IpAddr> {
-        self.client
+    /// The address the service at `url` echoes back to `client`.
+    async fn fetch(client: &reqwest::Client, url: &str) -> Result<IpAddr> {
+        client
             .get(url)
             .send()
             .await?
@@ -63,9 +63,14 @@ impl Endpoints {
     }
 
     /// The address of `family` ("IPv4" or "IPv6", which `pick` takes) that the
-    /// first URL to answer echoes, starting with the one that last answered;
-    /// none if there are no URLs.
-    async fn resolve<T>(&self, family: &str, pick: fn(IpAddr) -> Option<T>) -> Result<Vec<T>> {
+    /// first URL to answer echoes to `client`, starting with the one that last
+    /// answered; none if there are no URLs.
+    async fn resolve<T>(
+        &self,
+        client: &reqwest::Client,
+        family: &str,
+        pick: fn(IpAddr) -> Option<T>,
+    ) -> Result<Vec<T>> {
         let count = self.urls.len();
         let start = self.current.load(Ordering::Relaxed);
         let mut last_err = None;
@@ -74,7 +79,7 @@ impl Endpoints {
             if let Some(err) = last_err.take() {
                 log::warn!("{err:#}; trying {url}");
             }
-            match self.fetch(url).await {
+            match Self::fetch(client, url).await {
                 Ok(addr) => match pick(addr) {
                     Some(addr) => {
                         self.current.store(index, Ordering::Relaxed);
@@ -155,10 +160,26 @@ impl HttpResolver {
     ///
     /// Requests of both families then use `client`, which may connect over
     /// either, so each URL has to be reachable over its family only.
+    /// [`check`](IpResolver::check) doesn't use it, as it needs a client bound
+    /// to the address it checks.
     pub fn with_client(mut self, client: reqwest::Client) -> Self {
         self.ipv4.client = client.clone();
         self.ipv6.client = client;
         self
+    }
+
+    /// Removes `urls` from both families.
+    pub(super) fn remove_urls(&mut self, urls: &[&str]) {
+        for endpoints in [&mut self.ipv4, &mut self.ipv6] {
+            endpoints.urls.retain(|url| !urls.contains(&url.as_str()));
+            endpoints.current = AtomicUsize::new(0);
+        }
+    }
+
+    /// The IPv4 and IPv6 URLs, in fallback order.
+    #[cfg(test)]
+    pub(super) fn urls(&self) -> (&[String], &[String]) {
+        (&self.ipv4.urls, &self.ipv6.urls)
     }
 }
 
@@ -183,7 +204,7 @@ fn family_client(builder: reqwest::ClientBuilder, local_address: IpAddr) -> reqw
 impl IpResolver for HttpResolver {
     async fn resolve_a(&self) -> Result<Vec<Ipv4Addr>> {
         self.ipv4
-            .resolve("IPv4", |addr| match addr {
+            .resolve(&self.ipv4.client, "IPv4", |addr| match addr {
                 IpAddr::V4(addr) => Some(addr),
                 IpAddr::V6(_) => None,
             })
@@ -192,11 +213,37 @@ impl IpResolver for HttpResolver {
 
     async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>> {
         self.ipv6
-            .resolve("IPv6", |addr| match addr {
+            .resolve(&self.ipv6.client, "IPv6", |addr| match addr {
                 IpAddr::V6(addr) => Some(addr),
                 IpAddr::V4(_) => None,
             })
             .await
+    }
+
+    /// Whether the services, asked from `addr`, see `addr` itself, i.e. it's
+    /// public and not behind NAT; false if its family has no URLs.
+    async fn check(&self, addr: IpAddr) -> Result<bool> {
+        let client = reqwest::Client::builder()
+            .local_address(addr)
+            .build()
+            .context("failed to initialize the HTTP client")?;
+        let seen = match addr {
+            IpAddr::V4(_) => self
+                .ipv4
+                .resolve(&client, "IPv4", |seen| seen.is_ipv4().then_some(seen)),
+            IpAddr::V6(_) => self
+                .ipv6
+                .resolve(&client, "IPv6", |seen| seen.is_ipv6().then_some(seen)),
+        }
+        .await
+        .with_context(|| format!("check {addr}"))?;
+        match seen.first() {
+            Some(&seen) if seen != addr => {
+                log::debug!("{addr} is seen as {seen}");
+                Ok(false)
+            }
+            seen => Ok(seen.is_some()),
+        }
     }
 }
 
@@ -245,6 +292,33 @@ mod tests {
             ipv4: endpoints(Ipv4Addr::UNSPECIFIED.into()),
             ipv6: endpoints(Ipv6Addr::UNSPECIFIED.into()),
         }
+    }
+
+    #[tokio::test]
+    async fn check_from_the_address() {
+        let listener = TcpListener::bind((LOCALHOST_V4, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(echo_ip(listener));
+
+        let resolver = HttpResolver::new().with_url_v4(local_url(port));
+        assert!(resolver.check(LOCALHOST_V4).await.unwrap());
+        // no IPv6 URL, so nothing can confirm an IPv6 address
+        assert!(!resolver.check(LOCALHOST_V6).await.unwrap());
+    }
+
+    #[test]
+    fn remove_urls_keeps_the_others() {
+        let mut resolver = HttpResolver::new()
+            .with_url("https://a")
+            .with_url_v4("https://b")
+            .with_url_v6("https://c");
+        resolver.ipv4.current.store(1, Ordering::Relaxed);
+        resolver.remove_urls(&["https://a"]);
+        assert_eq!(
+            resolver.urls(),
+            (&["https://b".into()][..], &["https://c".into()][..])
+        );
+        assert_eq!(resolver.ipv4.current.load(Ordering::Relaxed), 0);
     }
 
     #[test]

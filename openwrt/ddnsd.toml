@@ -4,16 +4,11 @@
 #
 # The file holds credentials: ddnsd refuses it if group or others can read it.
 
-# The default resolvers: the local addresses an echo service also sees.
-# resolvers = [
-#   { type = "all", resolvers = [
-#     { type = "local" },        # optionally interface = "wan"
-#     { type = "http",           # echo services, the next one used if one fails
-#       ipv4_url = "https://api.ipify.org",
-#       ipv6_url = "https://api6.ipify.org",
-#       url = ["https://ifconfig.me/ip", "https://icanhazip.com"] },
-#   ] },
-# ]
+# By default, the global addresses of local interfaces that an echo service
+# sees as themselves are published.
+# [resolver]
+# local = false                # behind NAT: publish what the echo service sees
+# interface = "pppoe-wan"      # only this device's addresses, e.g. the WAN
 
 # [provider.cloudflare]
 # api_token = "..."            # needs Zone:Read and DNS:Edit

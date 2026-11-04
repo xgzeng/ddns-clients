@@ -3,24 +3,13 @@
 #
 #   install -m 600 ddnsd.example.toml /etc/ddnsd.toml
 #
-# Top-level settings must come before the first [provider.<name>] table.
+# Top-level settings must come before the [resolver] and [provider.<name>] tables.
 
 tick = 15                      # seconds between checks, which retry failed
                                # updates; default 15
-resolve_interval = 300         # seconds between public ip lookups, default 300
-# watch_interface = "eth0"     # look up at the next check after this interface's
-                               # addresses change; default: all interfaces (Linux)
-resolvers = [                  # combined, failed ones skipped; this is the default:
-  { type = "all", resolvers = [  # the local addresses an echo service also sees
-    { type = "local" },          # global addresses of local interfaces; only one
-                                 # with e.g. interface = "eth0"
-    { type = "http",             # echo services, the next one used if one fails:
-      ipv4_url = "https://api.ipify.org",
-      ipv6_url = "https://api6.ipify.org",
-      url = ["https://ifconfig.me/ip", "https://icanhazip.com"] },  # both
-                                 # families, after their own URLs
-  ] },
-]
+resolve_interval = 300         # seconds between public ip lookups, default 300;
+                               # on Linux also at the next check after the local
+                               # addresses change
 # defaults for all providers, each can override them
 ipv4 = true                    # look up IPv4 addresses, and the default for
                                # providers, which can't enable it if false;
@@ -33,6 +22,19 @@ replace_only = false           # only re-point existing records, never create or
 cache_expire = 3600            # seconds after which records are read again from the
                                # provider, warning about changes made elsewhere;
                                # 0 = never; default 3600
+
+# How the public addresses are found: each global address of local interfaces
+# that an echo service, asked from that address, sees as itself (Linux), or
+# else the address the echo service sees. The echo services are fallbacks:
+# icanhazip.com, ifconfig.me and ipify.org, then the URLs below.
+[resolver]
+# local = true                 # check local addresses; false behind NAT (Linux)
+# interface = "eth0"           # only this interface's addresses, and only its
+                               # changes trigger a lookup; default all
+# builtin_urls = true          # use the built-in echo services; default true
+# url = "https://ip.example.net"  # more echo services, for both families
+# ipv4_url = ["https://ipv4.example.net"]  # for IPv4, before url; each a URL
+# ipv6_url = ["https://ipv6.example.net"]  # or a list of them
 
 # One table per provider. `type` defaults to the name after "provider.", so
 # [provider.cloudflare] needs no type; several entries of the same type need

@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
         None => {
             #[cfg(target_os = "linux")]
             watch_addresses(
-                config.watch_interface.clone(),
+                config.resolver.interface.clone(),
                 daemon.addresses_changed.clone(),
             );
             daemon.run().await

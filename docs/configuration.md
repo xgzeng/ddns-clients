@@ -22,15 +22,9 @@ records, run `ddnsd dry-run`.
 ```toml
 resolve_interval = 300
 ttl = 600
-resolvers = [
-  { type = "all", resolvers = [
-    { type = "local" },
-    { type = "http",
-      ipv4_url = "https://api.ipify.org",
-      ipv6_url = "https://api6.ipify.org",
-      url = ["https://ifconfig.me/ip", "https://icanhazip.com"] },
-  ] },
-]
+
+[resolver]
+interface = "pppoe-wan"
 
 [provider.home]
 type = "cloudflare"
@@ -47,90 +41,64 @@ ipv6 = false
 
 ## General settings
 
-These must come before the first `[provider.<name>]` table, as TOML would
-otherwise read them as part of that table.
+These must come before the `[resolver]` and the first `[provider.<name>]` table,
+as TOML would otherwise read them as part of that table.
 
 | Setting | Default | |
 |---|---|---|
 | `tick` | `15` | Seconds between the daemon's checks. Each check looks up the public addresses once `resolve_interval` has passed, and updates the providers whose addresses changed or whose last update failed, unless the provider asked to wait; must not be `0` |
-| `resolve_interval` | `300` | Seconds between lookups of the public addresses, which happen at the first check after it. On Linux they are also looked up at the next check after the global addresses of a local interface change, e.g. after a WAN reconnect |
-| `watch_interface` | all | The interface whose address changes trigger a lookup, e.g. `pppoe-wan`; Linux only |
-| `resolvers` | local and ipify, falling back to ifconfig.me and icanhazip | How to find the public addresses, see [Resolvers](#resolvers); must not be empty |
+| `resolve_interval` | `300` | Seconds between lookups of the public addresses, which happen at the first check after it. On Linux they are also looked up at the next check after the global addresses of a local interface change, e.g. after a WAN reconnect; with `resolver.interface`, only that interface's |
 | `ipv4`, `ipv6` | `true` | Which public addresses are looked up, and defaults for all providers; a provider can't enable a family disabled here |
 | `ttl`, `max_records`, `replace_only`, `cache_expire` | | Defaults for all providers, see [Record settings](#record-settings) |
 
-## Resolvers
+## Resolver
 
-`resolvers` is a list of the ways to find this host's public addresses. All of
-them are asked, separately for IPv4 and IPv6, and the addresses they find are
-merged, without duplicates. A failed one is skipped, and the lookup fails only if
-all of them failed. The addresses are resolved every `resolve_interval`, at the
-next `tick`, and pushed to all providers. A family whose lookup finds nothing or
-fails keeps its last known addresses.
+The optional `[resolver]` table sets how this host's public addresses are
+found, separately for IPv4 and IPv6. They are looked up every
+`resolve_interval`, at the next `tick`, and pushed to all providers. A family
+whose lookup finds nothing or fails keeps its last known addresses.
 
-| `type` | |
-|---|---|
-| `icanhazip` | [icanhazip.com](https://icanhazip.com) |
-| `ipify` | [ipify.org](https://www.ipify.org) |
-| `ifconfig.me` | [ifconfig.me](https://ifconfig.me) |
-| `http` | Any service echoing the client's IP as plain text, see below |
-| `local` | Global addresses of local network interfaces, or only of `interface`, e.g. `interface = "eth0"`; Linux only |
-| `any` | The addresses any of its `resolvers` found, skipping failed ones, like the top-level list |
-| `all` | The addresses all of its `resolvers` found, in the order of the first; fails if any of them fails |
+By default, on Linux, every global address of the local interfaces is checked:
+an echo service such as [icanhazip.com](https://icanhazip.com) is asked from
+that address, and the address is published if the service sees that same
+address, i.e. it's not behind NAT. So all of a host's public IPv6 addresses
+are found, and with several uplinks and source-based routing, e.g. OpenWrt's
+mwan3, the address of each. Private, CGNAT, deprecated and temporary IPv6
+addresses are skipped. A failed check skips its address, and the lookup fails
+only if every check failed.
 
-`http` takes `ipv4_url` and `ipv6_url`, for their family, and `url`, for both
-families if its host has both A and AAAA records. Each is a URL or a list of
-them, and at least one URL is required; a family left without a URL isn't
-resolved. A family's URLs are fallbacks: its own URLs, then `url`, in order.
-The one that last answered is asked first, and the next ones only if it fails:
+With `local = false`, or on other systems, the address the echo service sees
+is published: one per family, e.g. a NAT router's public IPv4 address.
+
+The echo services are fallbacks: [icanhazip.com](https://icanhazip.com),
+[ifconfig.me](https://ifconfig.me) and [ipify.org](https://www.ipify.org),
+then the URLs added here, a family's own URLs before `url`. The one that last
+answered is asked first, and the next ones only if it fails. A service must
+answer with the client's IP as plain text.
+
+| Setting | Default | |
+|---|---|---|
+| `local` | `true` | Check the addresses of local interfaces; `false` publishes what the echo service sees, e.g. behind NAT; Linux only |
+| `interface` | all | Only check this interface's addresses, e.g. `pppoe-wan`, and only look them up again early when they change; needs `local`; Linux only |
+| `builtin_urls` | `true` | Use the built-in echo services; if `false`, at least one URL below is needed |
+| `url` | | Echo services for both families, on hosts with both A and AAAA records; a URL or a list |
+| `ipv4_url`, `ipv6_url` | | Echo services for one family, tried before `url`; a URL or a list |
+
+Behind a NAT router, with an own echo service as the last fallback:
 
 ```toml
-resolvers = [
-  { type = "http", url = "https://ip.example.net" },
-  { type = "http", ipv4_url = "https://ipv4.example.net", ipv6_url = "https://ipv6.example.net" },
-  { type = "http", url = "https://ip.example.net", ipv6_url = "https://ipv6.example.net" },
-  { type = "http", ipv4_url = ["https://ipv4.example.net", "https://ipv4.example.org"] },
-]
+[resolver]
+local = false
+url = "https://ip.example.net"
 ```
 
-The third one tries `https://ipv6.example.net` for IPv6 and falls back to
-`https://ip.example.net`.
-
-`any` and `all` nest, separately for IPv4 and IPv6. The default publishes the
-local addresses that an echo service also sees, so a host behind NAT, or with a
-private or CGNAT address, publishes no IPv4 address, and of several IPv6
-addresses only the one it connects from:
+Only your own echo services, one per family:
 
 ```toml
-resolvers = [
-  { type = "all", resolvers = [
-    { type = "local" },
-    { type = "http",
-      ipv4_url = "https://api.ipify.org",
-      ipv6_url = "https://api6.ipify.org",
-      url = ["https://ifconfig.me/ip", "https://icanhazip.com"] },
-  ] },
-]
-```
-
-Behind a NAT router, publish what an echo service sees instead:
-
-```toml
-resolvers = [
-  { type = "http",
-    ipv4_url = ["https://ipv4.icanhazip.com", "https://api.ipify.org"],
-    ipv6_url = ["https://ipv6.icanhazip.com", "https://api6.ipify.org"] },
-]
-```
-
-With two uplinks, this publishes the addresses of both interfaces, skipping one
-that can't be read:
-
-```toml
-resolvers = [
-  { type = "local", interface = "wan1" },
-  { type = "local", interface = "wan2" },
-]
+[resolver]
+builtin_urls = false
+ipv4_url = "https://ipv4.example.net"
+ipv6_url = ["https://ipv6.example.net", "https://ipv6.example.org"]
 ```
 
 ## Providers

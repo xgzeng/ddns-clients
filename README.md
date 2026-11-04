@@ -19,9 +19,10 @@ DNS providers:
 | No-IP | at most one A and one AAAA record per hostname, which can be re-pointed but not removed; TTL is ignored; current records are read from No-IP's nameservers over DNS |
 | [PKARR](https://pkdns.net) | records under an Ed25519 key, published on the Mainline DHT and PKARR relays and republished every `cache_expire`; the `pkarr` cargo feature, on by default |
 
-IP resolvers: HTTP echo services (icanhazip, ipify, ifconfig.me, or custom
-URLs) and local interfaces via netlink (Linux), which can be combined, e.g. to
-the local addresses an echo service confirms.
+IP resolution: every global address of local interfaces (Linux, via netlink)
+that an HTTP echo service (icanhazip, ifconfig.me, ipify, or custom URLs),
+asked from that address, sees as itself; or, behind NAT, the address the echo
+service sees.
 
 ## Installation
 
@@ -70,18 +71,15 @@ To build from source, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 ### Resolving the public IP
 
 ```rust
-use ddns_clients::{IpResolver, resolve};
+use ddns_clients::resolve::DefaultResolver;
 
-let resolver = resolve::default_resolvers();   // local addresses an echo service sees
-let ipv4 = resolver.resolve_a().await?;        // Vec<Ipv4Addr>
-let ipv6 = resolver.resolve_aaaa().await.unwrap_or_default(); // none without IPv6
+// local addresses an echo service confirms, IPv4 and IPv6
+let ips = DefaultResolver::new().resolve().await?; // Vec<IpAddr>
 ```
 
 ### Updating DNS records
 
 ```rust
-use std::net::IpAddr;
-
 use ddns_clients::DynDnsClient;
 
 let mut client = DynDnsClient::provider("cloudflare")?
@@ -89,7 +87,6 @@ let mut client = DynDnsClient::provider("cloudflare")?
     .zone("example.com")
     .domain("myhost.example.com")
     .build()?;
-let ips = ipv4.into_iter().map(IpAddr::from).chain(ipv6.into_iter().map(IpAddr::from));
 client.update(ips).await?; // replaces the domain's A/AAAA records
 ```
 

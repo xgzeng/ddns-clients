@@ -2,22 +2,19 @@
 //!
 //! An [`IpResolver`] finds this host's public IPv4 and IPv6 addresses:
 //!
-//! - [`HttpResolver`] asks an online "what is my IP" service.
+//! - [`DefaultResolver`] checks each global address of local interfaces with
+//!   online "what is my IP" services, or just asks them.
+//! - [`HttpResolver`] asks such services, falling back from one to the next.
 //! - [`LocalResolver`] (Linux only) reads the addresses of local interfaces.
-//!
-//! A [`CompositeResolver`] combines several resolvers: the union of their
-//! addresses, skipping failed ones ([`any`](CompositeResolver::any)), or the
-//! addresses all of them found ([`all`](CompositeResolver::all)).
 
 mod http;
 #[cfg(target_os = "linux")]
 mod local;
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use async_trait::async_trait;
-use futures_util::future::join_all;
 
 pub use http::HttpResolver;
 #[cfg(target_os = "linux")]
@@ -34,254 +31,349 @@ pub trait IpResolver: Send + Sync {
 
     /// Resolves the public IPv6 addresses, for AAAA records.
     async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>>;
+
+    /// Whether `addr` is a public address of this host, according to this
+    /// resolver; by default, whether it resolves `addr`'s family to it.
+    async fn check(&self, addr: IpAddr) -> Result<bool> {
+        Ok(match addr {
+            IpAddr::V4(addr) => self.resolve_a().await?.contains(&addr),
+            IpAddr::V6(addr) => self.resolve_aaaa().await?.contains(&addr),
+        })
+    }
 }
 
-/// Combines the addresses of several resolvers, which are all asked at once,
-/// deduplicated and in the order of the resolvers.
+/// The URLs of the services [`DefaultResolver`] uses unless
+/// [`without_builtin_urls`](DefaultResolver::without_builtin_urls).
+const BUILTIN_URLS: [&str; 4] = [
+    HttpResolver::ICANHAZIP,
+    HttpResolver::IFCONFIG_ME,
+    HttpResolver::IPIFY_IPV4,
+    HttpResolver::IPIFY_IPV6,
+];
+
+/// Finds every public address of this host: on Linux, each global address of
+/// local interfaces that an echo service, asked from that address, sees as
+/// itself, i.e. that isn't behind NAT; without the local check, the one
+/// address the echo service sees.
 ///
-/// [`any`](Self::any) is the union, skipping failed resolvers and logging their
-/// errors; [`all`](Self::all) is the intersection, and fails if any of them
-/// fails. Composites nest, e.g. an `all` of the local addresses and an `any` of
-/// two echo services: the local addresses that an echo service also sees.
-pub struct CompositeResolver {
-    /// Intersection, every resolver must succeed; otherwise union, failed ones
-    /// skipped.
-    all: bool,
-    resolvers: Vec<Box<dyn IpResolver>>,
+/// The echo services are fallbacks, as in [`HttpResolver`]:
+/// <https://icanhazip.com>, <https://ifconfig.me> and
+/// <https://www.ipify.org>, then any added with [`with_url`](Self::with_url).
+///
+/// ```no_run
+/// use ddns_clients::resolve::DefaultResolver;
+///
+/// let resolver = DefaultResolver::new()
+///     .with_interface("eth0")
+///     .with_url("https://ip.example.net");
+/// ```
+pub struct DefaultResolver {
+    /// The addresses to check; `None` to publish what the services see.
+    #[cfg(target_os = "linux")]
+    local: Option<LocalResolver>,
+    http: HttpResolver,
 }
 
-impl CompositeResolver {
-    /// OR: the addresses of the resolvers that succeed; fails only if every
-    /// one failed, with the last error.
-    pub fn any(resolvers: Vec<Box<dyn IpResolver>>) -> Self {
-        CompositeResolver {
-            all: false,
-            resolvers,
+impl DefaultResolver {
+    /// Checks the addresses of all local interfaces with the built-in
+    /// services.
+    ///
+    /// # Panics
+    ///
+    /// If the HTTP client can't be initialized, as [`HttpResolver::new`].
+    pub fn new() -> Self {
+        DefaultResolver {
+            #[cfg(target_os = "linux")]
+            local: Some(LocalResolver::default()),
+            http: HttpResolver::new()
+                .with_url(HttpResolver::ICANHAZIP)
+                .with_url(HttpResolver::IFCONFIG_ME)
+                .with_url_v4(HttpResolver::IPIFY_IPV4)
+                .with_url_v6(HttpResolver::IPIFY_IPV6),
         }
     }
 
-    /// AND: the addresses that every resolver found, in the order of the first;
-    /// fails if any one fails.
-    pub fn all(resolvers: Vec<Box<dyn IpResolver>>) -> Self {
-        CompositeResolver {
-            all: true,
-            resolvers,
-        }
+    /// Checks only the addresses of the interface `name`, e.g. `eth0`.
+    #[cfg(target_os = "linux")]
+    pub fn with_interface(mut self, name: impl Into<String>) -> Self {
+        self.local = Some(LocalResolver::default().interface(name));
+        self
     }
 
-    /// Combines the results of `resolve` on each resolver, which resolve
-    /// `family` ("IPv4" or "IPv6", for logging).
-    async fn combine<'a, T, F, Fut>(&'a self, family: &str, resolve: F) -> Result<Vec<T>>
-    where
-        T: PartialEq,
-        F: Fn(&'a dyn IpResolver) -> Fut,
-        Fut: Future<Output = Result<Vec<T>>>,
-    {
-        let results = join_all(self.resolvers.iter().map(|resolver| resolve(&**resolver))).await;
-        // `None` until a resolver succeeded
-        let mut addrs: Option<Vec<T>> = None;
-        let mut last_err = None;
-        for result in results {
-            match result {
-                Ok(found) => {
-                    addrs = Some(match addrs.take() {
-                        Some(mut addrs) if self.all => {
-                            addrs.retain(|addr| found.contains(addr));
-                            addrs
-                        }
-                        // the union, which for `all` starts with the first
-                        addrs => {
-                            let mut addrs = addrs.unwrap_or_default();
-                            for addr in found {
-                                if !addrs.contains(&addr) {
-                                    addrs.push(addr);
-                                }
-                            }
-                            addrs
-                        }
-                    });
-                }
-                Err(err) if self.all => return Err(err),
-                // the last error is returned if all failed; log only the
-                // skipped ones, so that each error is logged once when nested
-                Err(err) => {
-                    if let Some(skipped) = last_err.replace(err) {
-                        log::warn!("resolve {family} address failed: {skipped:#}");
-                    }
+    /// Skips the local check: resolves to the address the services see, e.g.
+    /// behind NAT.
+    #[cfg(target_os = "linux")]
+    pub fn without_local(mut self) -> Self {
+        self.local = None;
+        self
+    }
+
+    /// Doesn't use the built-in services, only the added URLs.
+    pub fn without_builtin_urls(mut self) -> Self {
+        self.http.remove_urls(&BUILTIN_URLS);
+        self
+    }
+
+    /// Adds a service on a host reachable over both families, as the last
+    /// fallback of both; see [`HttpResolver::with_url`].
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.http = self.http.with_url(url);
+        self
+    }
+
+    /// Adds an IPv4 service as the last IPv4 fallback.
+    pub fn with_url_v4(mut self, url: impl Into<String>) -> Self {
+        self.http = self.http.with_url_v4(url);
+        self
+    }
+
+    /// Adds an IPv6 service as the last IPv6 fallback.
+    pub fn with_url_v6(mut self, url: impl Into<String>) -> Self {
+        self.http = self.http.with_url_v6(url);
+        self
+    }
+
+    /// Resolves the public addresses of both families at once, IPv4 first.
+    ///
+    /// A family that fails is logged and contributes no addresses, so
+    /// updating records with the result removes that family's records; use
+    /// [`resolve_a`](IpResolver::resolve_a) and
+    /// [`resolve_aaaa`](IpResolver::resolve_aaaa) to tell the cases apart.
+    ///
+    /// # Errors
+    ///
+    /// If both families failed, with the IPv4 error, or no address was found.
+    pub async fn resolve(&self) -> Result<Vec<IpAddr>> {
+        let (ipv4, ipv6) = futures_util::future::join(self.resolve_a(), self.resolve_aaaa()).await;
+        combine(ipv4, ipv6)
+    }
+}
+
+/// The addresses of both families; see [`DefaultResolver::resolve`].
+fn combine(ipv4: Result<Vec<Ipv4Addr>>, ipv6: Result<Vec<Ipv6Addr>>) -> Result<Vec<IpAddr>> {
+    let ipv4 = ipv4.map(|addrs| addrs.into_iter().map(IpAddr::from).collect::<Vec<_>>());
+    let ipv6 = ipv6.map(|addrs| addrs.into_iter().map(IpAddr::from).collect::<Vec<_>>());
+    let mut addrs = vec![];
+    match (ipv4, ipv6) {
+        (Err(err), Err(_)) => return Err(err),
+        (ipv4, ipv6) => {
+            for (family, result) in [("IPv4", ipv4), ("IPv6", ipv6)] {
+                match result {
+                    Ok(found) => addrs.extend(found),
+                    Err(err) => log::warn!("resolve {family} address failed: {err:#}"),
                 }
             }
         }
-        match (addrs, last_err) {
-            (None, Some(err)) => Err(err),
-            (addrs, skipped) => {
-                if let Some(skipped) = skipped {
-                    log::warn!("resolve {family} address failed: {skipped:#}");
-                }
-                Ok(addrs.unwrap_or_default())
-            }
-        }
+    }
+    if addrs.is_empty() {
+        bail!("no public ip address found");
+    }
+    Ok(addrs)
+}
+
+impl Default for DefaultResolver {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
-impl IpResolver for CompositeResolver {
+impl IpResolver for DefaultResolver {
     async fn resolve_a(&self) -> Result<Vec<Ipv4Addr>> {
-        self.combine("IPv4", |resolver| resolver.resolve_a()).await
+        #[cfg(target_os = "linux")]
+        if let Some(local) = &self.local {
+            let addrs = local.resolve_a().await?;
+            return confirm(addrs, |addr| self.http.check(addr.into())).await;
+        }
+        self.http.resolve_a().await
     }
 
     async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>> {
-        self.combine("IPv6", |resolver| resolver.resolve_aaaa())
-            .await
+        #[cfg(target_os = "linux")]
+        if let Some(local) = &self.local {
+            let addrs = local.resolve_aaaa().await?;
+            return confirm(addrs, |addr| self.http.check(addr.into())).await;
+        }
+        self.http.resolve_aaaa().await
     }
 }
 
-/// The default resolver: the global addresses of local interfaces that an
-/// echo service also sees, <https://icanhazip.com> with <https://ifconfig.me>
-/// and <https://www.ipify.org> as fallbacks; on other
-/// systems, just what the echo service sees.
-pub fn default_resolvers() -> CompositeResolver {
-    let echo = HttpResolver::new()
-        .with_url(HttpResolver::ICANHAZIP)
-        .with_url(HttpResolver::IFCONFIG_ME)
-        .with_url_v4(HttpResolver::IPIFY_IPV4)
-        .with_url_v6(HttpResolver::IPIFY_IPV6);
-    CompositeResolver::all(vec![
-        #[cfg(target_os = "linux")]
-        Box::new(LocalResolver::default()),
-        Box::new(echo),
-    ])
+/// The `addrs` that `check` confirms, checked at once, in their order. A
+/// failed check skips its address, and fails only if all of them failed, with
+/// the last error.
+#[cfg(target_os = "linux")]
+async fn confirm<T, F, Fut>(addrs: Vec<T>, check: F) -> Result<Vec<T>>
+where
+    T: Copy,
+    F: Fn(T) -> Fut,
+    Fut: Future<Output = Result<bool>>,
+{
+    let results = futures_util::future::join_all(addrs.iter().map(|&addr| check(addr))).await;
+    let mut confirmed = vec![];
+    let mut checked = false;
+    let mut last_err = None;
+    for (addr, result) in addrs.into_iter().zip(results) {
+        match result {
+            Ok(public) => {
+                checked = true;
+                if public {
+                    confirmed.push(addr);
+                }
+            }
+            // the last error is returned if all failed; log only the others,
+            // so that each error is logged once
+            Err(err) => {
+                if let Some(skipped) = last_err.replace(err) {
+                    log::warn!("{skipped:#}");
+                }
+            }
+        }
+    }
+    match last_err {
+        Some(err) if !checked => Err(err),
+        Some(skipped) => {
+            log::warn!("{skipped:#}");
+            Ok(confirmed)
+        }
+        None => Ok(confirmed),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use anyhow::anyhow;
-
     use super::*;
 
-    /// Returns fixed results: `None` fails, `Some` returns the addresses.
-    struct Fixed {
-        v4: Option<Vec<Ipv4Addr>>,
-        v6: Option<Vec<Ipv6Addr>>,
+    #[test]
+    fn builtin_urls() {
+        let resolver = DefaultResolver::new().with_url_v4("https://v4");
+        let (v4, v6) = resolver.http.urls();
+        assert_eq!(
+            v4,
+            [
+                HttpResolver::ICANHAZIP,
+                HttpResolver::IFCONFIG_ME,
+                HttpResolver::IPIFY_IPV4,
+                "https://v4"
+            ]
+        );
+        assert_eq!(
+            v6,
+            [
+                HttpResolver::ICANHAZIP,
+                HttpResolver::IFCONFIG_ME,
+                HttpResolver::IPIFY_IPV6
+            ]
+        );
+
+        // whether before or after adding URLs
+        for resolver in [
+            DefaultResolver::new()
+                .without_builtin_urls()
+                .with_url("https://both"),
+            DefaultResolver::new()
+                .with_url("https://both")
+                .without_builtin_urls(),
+        ] {
+            let (v4, v6) = resolver.http.urls();
+            assert_eq!(v4, ["https://both"]);
+            assert_eq!(v6, ["https://both"]);
+        }
     }
+
+    #[test]
+    fn combine_families() {
+        let v4 = || -> Result<Vec<Ipv4Addr>> { Ok(vec![Ipv4Addr::new(192, 0, 2, 1)]) };
+        let v6 = || -> Result<Vec<Ipv6Addr>> { Ok(vec!["2001:db8::1".parse().unwrap()]) };
+        let failed = || anyhow::anyhow!("failed");
+        let addrs =
+            |addrs: &[&str]| -> Vec<IpAddr> { addrs.iter().map(|a| a.parse().unwrap()).collect() };
+
+        assert_eq!(
+            combine(v4(), v6()).unwrap(),
+            addrs(&["192.0.2.1", "2001:db8::1"])
+        );
+        // a failed family is skipped
+        assert_eq!(combine(v4(), Err(failed())).unwrap(), addrs(&["192.0.2.1"]));
+        assert_eq!(
+            combine(Err(failed()), v6()).unwrap(),
+            addrs(&["2001:db8::1"])
+        );
+        // both failed, or nothing found
+        assert!(combine(Err(failed()), Err(failed())).is_err());
+        let err = combine(Ok(vec![]), Ok(vec![])).unwrap_err();
+        assert_eq!(err.to_string(), "no public ip address found");
+    }
+
+    /// Resolves to fixed addresses.
+    struct Fixed(Vec<Ipv4Addr>);
 
     #[async_trait]
     impl IpResolver for Fixed {
         async fn resolve_a(&self) -> Result<Vec<Ipv4Addr>> {
-            self.v4.clone().ok_or_else(|| anyhow!("fixed failure"))
+            Ok(self.0.clone())
         }
 
         async fn resolve_aaaa(&self) -> Result<Vec<Ipv6Addr>> {
-            self.v6.clone().ok_or_else(|| anyhow!("fixed failure"))
+            Ok(vec![])
         }
     }
 
-    fn v4(s: &str) -> Ipv4Addr {
-        s.parse().unwrap()
-    }
-
-    fn v6(s: &str) -> Ipv6Addr {
-        s.parse().unwrap()
-    }
-
-    fn block_on<F: Future>(fut: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-            .block_on(fut)
-    }
-
-    fn fixed(v4s: Option<&[&str]>, v6s: Option<&[&str]>) -> Box<dyn IpResolver> {
-        Box::new(Fixed {
-            v4: v4s.map(|addrs| addrs.iter().map(|s| v4(s)).collect()),
-            v6: v6s.map(|addrs| addrs.iter().map(|s| v6(s)).collect()),
-        })
-    }
-
-    #[test]
-    fn any_merges_in_order() {
-        let resolver = CompositeResolver::any(vec![
-            fixed(Some(&["2.2.2.2", "1.1.1.1"]), Some(&[])),
-            fixed(Some(&["1.1.1.1", "3.3.3.3"]), Some(&["2001:4860::1"])),
-        ]);
-        assert_eq!(
-            block_on(resolver.resolve_a()).unwrap(),
-            [v4("2.2.2.2"), v4("1.1.1.1"), v4("3.3.3.3")]
-        );
-        assert_eq!(
-            block_on(resolver.resolve_aaaa()).unwrap(),
-            [v6("2001:4860::1")]
+    #[tokio::test]
+    async fn default_check_resolves() {
+        let resolver = Fixed(vec![Ipv4Addr::new(192, 0, 2, 1)]);
+        assert!(resolver.check("192.0.2.1".parse().unwrap()).await.unwrap());
+        assert!(!resolver.check("192.0.2.2".parse().unwrap()).await.unwrap());
+        assert!(
+            !resolver
+                .check("2001:db8::1".parse().unwrap())
+                .await
+                .unwrap()
         );
     }
 
-    #[test]
-    fn any_skips_failures() {
-        let resolver = CompositeResolver::any(vec![
-            fixed(None, Some(&[])),
-            fixed(Some(&["2.2.2.2"]), None),
-        ]);
-        // each family separately
-        assert_eq!(block_on(resolver.resolve_a()).unwrap(), [v4("2.2.2.2")]);
-        assert!(block_on(resolver.resolve_aaaa()).unwrap().is_empty());
-    }
+    #[cfg(target_os = "linux")]
+    mod confirm {
+        use anyhow::anyhow;
 
-    #[test]
-    fn any_fails_if_all_fail() {
-        let resolver = CompositeResolver::any(vec![fixed(None, None), fixed(None, None)]);
-        assert!(block_on(resolver.resolve_a()).is_err());
-        assert!(block_on(resolver.resolve_aaaa()).is_err());
-    }
+        use super::super::confirm;
 
-    #[test]
-    fn all_intersects_in_order() {
-        let resolver = CompositeResolver::all(vec![
-            fixed(Some(&["1.1.1.1", "2.2.2.2", "1.1.1.1"]), Some(&[])),
-            fixed(
-                Some(&["3.3.3.3", "2.2.2.2", "1.1.1.1"]),
-                Some(&["2001:4860::1"]),
-            ),
-        ]);
-        assert_eq!(
-            block_on(resolver.resolve_a()).unwrap(),
-            [v4("1.1.1.1"), v4("2.2.2.2")]
-        );
-        assert!(block_on(resolver.resolve_aaaa()).unwrap().is_empty());
-    }
+        /// `check` for `confirm`: odd numbers are confirmed, even ones not,
+        /// and those in `failing` fail.
+        async fn check(addr: u8, failing: &[u8]) -> anyhow::Result<bool> {
+            if failing.contains(&addr) {
+                return Err(anyhow!("check {addr} failed"));
+            }
+            Ok(addr % 2 == 1)
+        }
 
-    #[test]
-    fn all_of_disjoint_is_empty() {
-        let resolver = CompositeResolver::all(vec![
-            fixed(Some(&["1.1.1.1"]), Some(&["2001:4860::1"])),
-            fixed(Some(&["2.2.2.2"]), Some(&["2001:4860::2"])),
-        ]);
-        assert!(block_on(resolver.resolve_a()).unwrap().is_empty());
-        assert!(block_on(resolver.resolve_aaaa()).unwrap().is_empty());
-    }
+        #[tokio::test]
+        async fn keeps_confirmed_in_order() {
+            let confirmed = confirm(vec![5, 2, 1, 4, 3], |addr| check(addr, &[]))
+                .await
+                .unwrap();
+            assert_eq!(confirmed, [5, 1, 3]);
+        }
 
-    #[test]
-    fn all_fails_if_one_fails() {
-        let resolver = CompositeResolver::all(vec![
-            fixed(Some(&["1.1.1.1"]), Some(&[])),
-            fixed(None, Some(&[])),
-        ]);
-        assert!(block_on(resolver.resolve_a()).is_err());
-        assert!(block_on(resolver.resolve_aaaa()).is_ok());
-    }
+        #[tokio::test]
+        async fn skips_failed_checks() {
+            let confirmed = confirm(vec![1, 3, 5], |addr| check(addr, &[3]))
+                .await
+                .unwrap();
+            assert_eq!(confirmed, [1, 5]);
+        }
 
-    #[test]
-    fn nested() {
-        // local AND (echo OR echo), as the default: the local addresses the
-        // working echo service sees
-        let resolver = CompositeResolver::all(vec![
-            fixed(Some(&["1.1.1.1"]), Some(&["2001:4860::1", "2001:4860::2"])),
-            Box::new(CompositeResolver::any(vec![
-                fixed(None, None),
-                fixed(Some(&["1.1.1.1"]), Some(&["2001:4860::2"])),
-            ])),
-        ]);
-        assert_eq!(block_on(resolver.resolve_a()).unwrap(), [v4("1.1.1.1")]);
-        assert_eq!(
-            block_on(resolver.resolve_aaaa()).unwrap(),
-            [v6("2001:4860::2")]
-        );
+        #[tokio::test]
+        async fn fails_if_all_checks_fail() {
+            let err = confirm(vec![1, 2], |addr| check(addr, &[1, 2]))
+                .await
+                .unwrap_err();
+            assert_eq!(err.to_string(), "check 2 failed");
+        }
+
+        #[tokio::test]
+        async fn none_to_check() {
+            let confirmed = confirm(vec![], |addr| check(addr, &[])).await.unwrap();
+            assert!(confirmed.is_empty());
+        }
     }
 }

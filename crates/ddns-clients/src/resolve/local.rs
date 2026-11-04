@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use netlink_packet_route::{
     AddressFamily, RouteNetlinkMessage,
-    address::{AddressAttribute, AddressScope},
+    address::{AddressAttribute, AddressHeaderFlags, AddressScope},
 };
 use rtnetlink::{
     MulticastGroup,
@@ -17,8 +17,9 @@ use super::IpResolver;
 /// Resolves addresses assigned to local interfaces via netlink.
 ///
 /// Useful when the host has a public address directly, e.g. IPv6 or no NAT.
-/// Skips non-global and deprecated addresses. Must be used from within a
-/// Tokio runtime.
+/// Skips non-global and deprecated addresses, and IPv6 temporary (privacy)
+/// addresses, which change daily, and ones still in or failed duplicate
+/// address detection. Must be used from within a Tokio runtime.
 ///
 /// `LocalResolver::default()` reads all interfaces; [`interface`](Self::interface)
 /// limits it to one.
@@ -199,6 +200,15 @@ async fn global_addrs(
         });
         if cache_info.is_some_and(|info| info.ifa_preferred == 0 || info.ifa_valid == 0) {
             log::debug!("address {addr} is deprecated, skipping");
+            continue;
+        }
+
+        // for IPv6, the flag IPv4 calls secondary is IFA_F_TEMPORARY
+        let unusable = AddressHeaderFlags::Secondary
+            | AddressHeaderFlags::Tentative
+            | AddressHeaderFlags::Dadfailed;
+        if addr.is_ipv6() && addr_msg.header.flags.intersects(unusable) {
+            log::debug!("address {addr} is temporary or tentative, skipping");
             continue;
         }
 

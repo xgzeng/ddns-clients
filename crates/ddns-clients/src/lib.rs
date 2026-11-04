@@ -1,7 +1,7 @@
 //! A multi-provider dynamic DNS client library.
 //!
 //! - An [`IpResolver`] finds this host's public IP addresses, e.g.
-//!   [`HttpResolver`](resolve::HttpResolver); see [`resolve`].
+//!   [`DefaultResolver`](resolve::DefaultResolver); see [`resolve`].
 //! - A [`DynDnsProvider`] changes a domain's address records on a DNS
 //!   service, e.g. [`CloudflareProvider`] or [`NoIpProvider`]; see
 //!   [`providers`].
@@ -11,9 +11,7 @@
 //!
 //! ```no_run
 //! # async fn example() -> anyhow::Result<()> {
-//! use std::net::IpAddr;
-//!
-//! use ddns_clients::{DynDnsClient, IpResolver, providers, resolve};
+//! use ddns_clients::{DynDnsClient, providers, resolve::DefaultResolver};
 //!
 //! let mut client = DynDnsClient::provider(providers::CLOUDFLARE)?
 //!     .api_token("api-token")
@@ -21,12 +19,9 @@
 //!     .domain("myhost.example.com")
 //!     .ttl(Some(300))
 //!     .build()?;
-//! let resolver = resolve::default_resolvers();
-//! let ipv4 = resolver.resolve_a().await?;
-//! let ipv6 = resolver.resolve_aaaa().await.unwrap_or_default(); // none without IPv6
+//! let ips = DefaultResolver::new().resolve().await?;
 //!
 //! // replace the domain's A/AAAA records with the resolved addresses
-//! let ips = ipv4.into_iter().map(IpAddr::from).chain(ipv6.into_iter().map(IpAddr::from));
 //! let summary = client.update(ips).await?;
 //! println!("{summary:?}");
 //! # Ok(())
